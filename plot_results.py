@@ -4,10 +4,9 @@ import glob
 import os
 
 def get_latest_csv(prefix):
-    files = glob.glob(f"{prefix}_metrics_*.csv")
+    files = glob.glob(f"{prefix}_*.csv") if "inference_benchmark" in prefix else glob.glob(f"{prefix}_metrics_*.csv")
     if not files:
         return None
-    # Sort by modification time
     files.sort(key=os.path.getmtime, reverse=True)
     return files[0]
 
@@ -18,8 +17,7 @@ def main():
     exp3_file = get_latest_csv("exp3_dynamic")
 
     if not all([exp1_file, exp2_file, exp3_file]):
-        print("Missing one or more experiment CSV files. Please run all three scripts first.")
-        print(f"Found:\nExp1: {exp1_file}\nExp2: {exp2_file}\nExp3: {exp3_file}")
+        print("Missing one or more Phase 1 experiment CSV files.")
         return
 
     print("Loading data...")
@@ -27,52 +25,168 @@ def main():
     df2 = pd.read_csv(exp2_file)
     df3 = pd.read_csv(exp3_file)
 
-    # Validation Data
-    val1 = df1.dropna(subset=['Validation Loss']).copy()
-    val2 = df2.dropna(subset=['Validation Loss']).copy()
-    val3 = df3.dropna(subset=['Validation Loss']).copy()
-    
-    # Training Data
-    train1 = df1.dropna(subset=['Training Loss']).copy()
-    train2 = df2.dropna(subset=['Training Loss']).copy()
-    train3 = df3.dropna(subset=['Training Loss']).copy()
+    val1 = df1[df1['Global Step'] % 50 == 0].copy()
+    val2 = df2[df2['Global Step'] % 50 == 0].copy()
+    val3 = df3[df3['Global Step'] % 50 == 0].copy()
 
-    # --- Plot 1: Validation Loss Comparison ---
-    plt.figure(figsize=(10, 6))
-    # We use a custom style to make it look clean and paper-ready
+    final_val1 = val1['Validation Loss'].iloc[-1]
+    final_val2 = val2['Validation Loss'].iloc[-1]
+    final_val3 = val3['Validation Loss'].iloc[-1]
+
+    final_train1 = df1['Training Loss'].iloc[-1]
+    final_train2 = df2['Training Loss'].iloc[-1]
+    final_train3 = df3['Training Loss'].iloc[-1]
+
+    labels = ['Baseline\n(Full Layers)', 'Stochastic\n(50% Drop)', 'Dynamic\n(Gating)']
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
+    
     plt.style.use('seaborn-v0_8-darkgrid' if 'seaborn-v0_8-darkgrid' in plt.style.available else 'default')
-    
-    plt.plot(val1['Epoch'], val1['Validation Loss'], label='Baseline (Full Layers)', marker='o', linewidth=2.5, markersize=6)
-    plt.plot(val2['Epoch'], val2['Validation Loss'], label='Stochastic (50% Dropout)', marker='s', linewidth=2.5, markersize=6)
-    plt.plot(val3['Epoch'], val3['Validation Loss'], label='Dynamic Routing (Gating)', marker='^', linewidth=2.5, markersize=6)
-    
-    plt.title('Validation Loss Convergence vs Routing Strategy', fontsize=16, fontweight='bold', pad=15)
-    plt.xlabel('Epochs', fontsize=14)
-    plt.ylabel('Validation Loss', fontsize=14)
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.legend(fontsize=12, frameon=True, shadow=True)
-    plt.tight_layout()
-    plt.savefig('validation_loss_comparison.png', dpi=300, bbox_inches='tight')
-    print("Saved 'validation_loss_comparison.png'")
 
-    # --- Plot 2: Training Loss (Smoothed) ---
-    window = max(1, len(train1) // 20)  # Dynamic smoothing window
+    # =========================================================================
+    # PHASE 1 GRAPHS (Convergence Lines + Final Bars)
+    # =========================================================================
+    
+    # 1. Validation Loss Convergence (Line Graph)
     plt.figure(figsize=(10, 6))
-    
-    plt.plot(train1['Epoch'], train1['Training Loss'].rolling(window).mean(), label='Baseline', linewidth=2, alpha=0.9)
-    plt.plot(train2['Epoch'], train2['Training Loss'].rolling(window).mean(), label='Stochastic', linewidth=2, alpha=0.9)
-    plt.plot(train3['Epoch'], train3['Training Loss'].rolling(window).mean(), label='Dynamic', linewidth=2, alpha=0.9)
-    
-    plt.title(f'Smoothed Training Loss (Window={window})', fontsize=16, fontweight='bold', pad=15)
-    plt.xlabel('Epochs', fontsize=14)
-    plt.ylabel('Training Loss', fontsize=14)
-    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.plot(val1['Global Step'], val1['Validation Loss'], label='Baseline', marker='o', linewidth=2.5, markersize=6, color=colors[0])
+    plt.plot(val2['Global Step'], val2['Validation Loss'], label='Stochastic', marker='s', linewidth=2.5, markersize=6, color=colors[1])
+    plt.plot(val3['Global Step'], val3['Validation Loss'], label='Dynamic', marker='^', linewidth=2.5, markersize=6, color=colors[2])
+    plt.title('Validation Loss Convergence over Time', fontsize=16, fontweight='bold', pad=15)
+    plt.xlabel('Global Step', fontsize=14)
+    plt.ylabel('Validation Loss', fontsize=14)
     plt.legend(fontsize=12, frameon=True, shadow=True)
+    plt.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
-    plt.savefig('training_loss_comparison.png', dpi=300, bbox_inches='tight')
-    print("Saved 'training_loss_comparison.png'")
-    
-    print("\nPlotting complete! The images are ready for your paper.")
+    plt.savefig('validation_loss_convergence.png', dpi=300, bbox_inches='tight')
+
+    # 2. Final Validation Loss (Bar Chart)
+    plt.figure(figsize=(9, 6))
+    bars = plt.bar(labels, [final_val1, final_val2, final_val3], color=colors, edgecolor='black', alpha=0.85, width=0.6)
+    plt.title('Final Validation Loss Comparison', fontsize=16, fontweight='bold', pad=15)
+    plt.ylabel('Validation Loss (Lower is Better)', fontsize=14)
+    plt.grid(True, axis='y', linestyle='--', alpha=0.7)
+    for bar in bars:
+        yval = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2, yval + 0.05, f'{yval:.4f}', ha='center', va='bottom', fontsize=12, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig('validation_loss_final_bar.png', dpi=300, bbox_inches='tight')
+
+    # 3. Training Loss Trajectory (Line Graph)
+    plt.figure(figsize=(10, 6))
+    plt.plot(df1['Global Step'], df1['Training Loss'].ewm(alpha=0.1).mean(), label='Baseline', linewidth=2.5, color=colors[0])
+    plt.plot(df2['Global Step'], df2['Training Loss'].ewm(alpha=0.1).mean(), label='Stochastic', linewidth=2.5, color=colors[1])
+    plt.plot(df3['Global Step'], df3['Training Loss'].ewm(alpha=0.1).mean(), label='Dynamic', linewidth=2.5, color=colors[2])
+    plt.title('Smoothed Training Loss Trajectory (EWMA)', fontsize=16, fontweight='bold', pad=15)
+    plt.xlabel('Global Step', fontsize=14)
+    plt.ylabel('Training Loss', fontsize=14)
+    plt.legend(fontsize=12, frameon=True, shadow=True)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig('training_loss_trajectory.png', dpi=300, bbox_inches='tight')
+
+    # 4. Final Training Loss (Bar Chart)
+    plt.figure(figsize=(9, 6))
+    bars = plt.bar(labels, [final_train1, final_train2, final_train3], color=colors, edgecolor='black', alpha=0.85, width=0.6)
+    plt.title('Final Training Loss Comparison', fontsize=16, fontweight='bold', pad=15)
+    plt.ylabel('Training Loss (Lower is Better)', fontsize=14)
+    plt.grid(True, axis='y', linestyle='--', alpha=0.7)
+    for bar in bars:
+        yval = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2, yval + 0.05, f'{yval:.4f}', ha='center', va='bottom', fontsize=12, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig('training_loss_final_bar.png', dpi=300, bbox_inches='tight')
+
+    # =========================================================================
+    # PHASE 2 GRAPHS (Pareto Sweep and Inference)
+    # =========================================================================
+
+    # 5. Inference Speedup (Bar Chart)
+    inf_files = glob.glob("inference_benchmark_*.csv")
+    if inf_files:
+        inf_file = sorted(inf_files, key=os.path.getmtime, reverse=True)[0]
+        df_inf = pd.read_csv(inf_file)
+        plt.figure(figsize=(9, 6))
+        bars = plt.bar(df_inf['Active Layers'].astype(str), df_inf['Tokens Per Second'], color='#17becf', edgecolor='black', alpha=0.85, width=0.6)
+        plt.title('Inference Speed vs. Active Transformer Layers', fontsize=16, fontweight='bold', pad=15)
+        plt.xlabel('Active Layers Used', fontsize=14)
+        plt.ylabel('Speed (Tokens / Second)', fontsize=14)
+        plt.grid(True, axis='y', linestyle='--', alpha=0.7)
+        for bar in bars:
+            yval = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width()/2, yval + 500, f'{int(yval)}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig('inference_speedup_bar.png', dpi=300, bbox_inches='tight')
+
+    # Pareto Sweep Data
+    pareto_files = glob.glob("pareto_sweep_metrics_*.csv")
+    if pareto_files:
+        pareto_file = sorted(pareto_files, key=os.path.getmtime, reverse=True)[0]
+        df_par = pd.read_csv(pareto_file)
+        
+        # 6. Pareto Frontier Scatter Plot (Accuracy vs Compute)
+        plt.figure(figsize=(10, 6))
+        # Plot Dynamic Router curve
+        plt.plot(df_par['Avg Active Layers'], df_par['Validation Loss'], marker='D', color='#2ca02c', linewidth=2.5, markersize=8, label='Dynamic Routing')
+        for i, row in df_par.iterrows():
+            plt.annotate(f"P={row['Compute Penalty']}", 
+                         (row['Avg Active Layers'], row['Validation Loss']),
+                         textcoords="offset points", xytext=(0,10), ha='center', fontsize=10, color='#2ca02c')
+        
+        # Plot Baseline Point
+        plt.scatter(22, final_val1, color='#1f77b4', s=150, zorder=5, label='Baseline (22 Layers)')
+        plt.annotate("Baseline", (22, final_val1), textcoords="offset points", xytext=(0,10), ha='center', fontsize=11, fontweight='bold', color='#1f77b4')
+        
+        # Plot Stochastic Point
+        plt.scatter(13, final_val2, color='#ff7f0e', s=150, zorder=5, label='Stochastic (13 Layers)')
+        plt.annotate("Stochastic", (13, final_val2), textcoords="offset points", xytext=(0,10), ha='center', fontsize=11, fontweight='bold', color='#ff7f0e')
+
+        plt.title('Ultimate Pareto Frontier: Accuracy vs. Compute Efficiency', fontsize=16, fontweight='bold', pad=15)
+        plt.xlabel('Average Active Layers (Compute Cost)', fontsize=14)
+        plt.ylabel('Validation Loss (Lower is Better)', fontsize=14)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.gca().invert_xaxis()
+        plt.legend(fontsize=12, frameon=True, shadow=True)
+        plt.tight_layout()
+        plt.savefig('pareto_frontier_curve.png', dpi=300, bbox_inches='tight')
+
+        # 6b. Pareto Sweep (Dual-Axis Line Graph)
+        fig, ax1 = plt.subplots(figsize=(10, 6))
+        
+        # X-axis is Compute Penalty
+        x = df_par['Compute Penalty'].astype(str)
+        
+        # Left Y-axis: Active Layers
+        color1 = '#1f77b4'
+        ax1.set_xlabel('Compute Penalty', fontsize=14)
+        ax1.set_ylabel('Avg Active Layers (Compute Cost)', fontsize=14, color=color1)
+        ax1.plot(x, df_par['Avg Active Layers'], color=color1, marker='o', linewidth=3, markersize=8)
+        ax1.tick_params(axis='y', labelcolor=color1)
+        
+        # Right Y-axis: Validation Loss
+        ax2 = ax1.twinx()
+        color2 = '#d62728'
+        ax2.set_ylabel('Validation Loss', fontsize=14, color=color2)
+        ax2.plot(x, df_par['Validation Loss'], color=color2, marker='D', linewidth=3, markersize=8)
+        ax2.tick_params(axis='y', labelcolor=color2)
+        
+        plt.title('Impact of Compute Penalty on Layers & Accuracy', fontsize=16, fontweight='bold', pad=15)
+        fig.tight_layout()
+        plt.savefig('pareto_dual_axis.png', dpi=300, bbox_inches='tight')
+
+        # 7. Pareto Sweep (Bar Chart)
+        plt.figure(figsize=(10, 6))
+        bars = plt.bar([f"Penalty\n{p}" for p in df_par['Compute Penalty']], df_par['Validation Loss'], color='#d62728', edgecolor='black', alpha=0.85, width=0.6)
+        plt.title('Validation Loss across Compute Penalties', fontsize=16, fontweight='bold', pad=15)
+        plt.ylabel('Validation Loss', fontsize=14)
+        plt.grid(True, axis='y', linestyle='--', alpha=0.7)
+        for i, bar in enumerate(bars):
+            yval = bar.get_height()
+            layers = df_par['Avg Active Layers'].iloc[i]
+            plt.text(bar.get_x() + bar.get_width()/2, yval + 0.1, f'{yval:.2f}\n({layers:.1f} Layers)', ha='center', va='bottom', fontsize=11, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig('pareto_sweep_bar.png', dpi=300, bbox_inches='tight')
+
+    print("\nPlotting complete! 7 distinct visualizations have been generated for your paper.")
 
 if __name__ == "__main__":
     main()

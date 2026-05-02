@@ -94,6 +94,7 @@ with open(CSV_FILENAME, "w", newline="") as f:
 
 print("Starting custom pure-PyTorch training loop...")
 global_step = 0
+val_loss_str = ""
 
 for epoch in range(EPOCHS):
     model.train()
@@ -127,7 +128,6 @@ for epoch in range(EPOCHS):
             # Logging & Eval
             if global_step % 10 == 0:
                 current_train_loss = loss.item() * GRAD_ACCUM
-                val_loss_str = "NaN"
                 
                 # Evaluate every 50 steps
                 if global_step % 50 == 0:
@@ -144,7 +144,7 @@ for epoch in range(EPOCHS):
                     val_loss_str = f"{val_loss:.4f}"
                     model.train()
                 
-                print(f"Step {global_step} | Train Loss: {current_train_loss:.4f} | Val Loss: {val_loss_str}")
+                print(f"Step {global_step} | Train Loss: {current_train_loss:.4f} | Val Loss: {val_loss_str or 'N/A'}")
                 
                 with open(CSV_FILENAME, "a", newline="") as f:
                     writer = csv.writer(f)
