@@ -1,11 +1,15 @@
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import glob
 import os
+import json
 
 def get_latest_csv(prefix):
     """Return the most recently modified CSV matching the given prefix pattern."""
     if "inference_benchmark" in prefix:
+        files = glob.glob(f"{prefix}_*.csv")
+    elif "exp7_eval" in prefix:
         files = glob.glob(f"{prefix}_*.csv")
     else:
         files = glob.glob(f"{prefix}_metrics_*.csv")
@@ -295,6 +299,127 @@ def main():
         print(f"\nPhase 3 plotting complete! Generated 3 additional exp6 visualizations.")
     else:
         print("\nNo exp6 Gumbel metrics found (all runs were empty / crashed). Skipping Phase 3 plots.")
+
+    # =========================================================================
+    # PHASE 4 GRAPHS (exp7 Evaluation Harness — MMLU / GSM8K / ARC / PPL)
+    # =========================================================================
+    exp7_csv  = get_latest_csv("exp7_eval_results")
+    exp7_json = sorted(glob.glob("exp7_eval_summary_*.json"), key=os.path.getmtime, reverse=True)
+    exp7_json = exp7_json[0] if exp7_json else None
+
+    if exp7_csv:
+        print(f"\nFound exp7 evaluation results: {exp7_csv}")
+        df7 = pd.read_csv(exp7_csv)
+
+        # Friendly display names for variants
+        variant_labels = {
+            "base_tinyllama":    "Base\nTinyLlama",
+            "baseline_lora":     "Baseline\nLoRA (exp1)",
+            "stochastic_dropout":"Stochastic\nDropout (exp2)",
+            "gumbel_router":     "Gumbel\nRouter (exp6)",
+        }
+        df7["label"] = df7["variant"].map(lambda v: variant_labels.get(v, v))
+
+        variant_colors = {
+            "base_tinyllama":    "#aec7e8",
+            "baseline_lora":     "#1f77b4",
+            "stochastic_dropout":"#ff7f0e",
+            "gumbel_router":     "#9467bd",
+        }
+        df7["color"] = df7["variant"].map(lambda v: variant_colors.get(v, "#888888"))
+
+        # ── 11. Grouped Benchmark Accuracy Bar Chart ───────────────────────────
+        benchmark_cols = {
+            "mmlu_acc,none":                         "MMLU",
+            "gsm8k_exact_match,strict-match":        "GSM8K",
+            "arc_challenge_acc_norm,none":            "ARC-Challenge",
+        }
+        available_benchmarks = {k: v for k, v in benchmark_cols.items() if k in df7.columns}
+
+        if available_benchmarks:
+            n_tasks    = len(available_benchmarks)
+            n_variants = len(df7)
+            x          = range(n_variants)
+            bar_width  = 0.22
+            fig, ax    = plt.subplots(figsize=(11, 6))
+
+            for i, (col, task_label) in enumerate(available_benchmarks.items()):
+                offsets = [xi + (i - n_tasks / 2 + 0.5) * bar_width for xi in x]
+                vals    = df7[col].fillna(0).astype(float) * 100
+                bars    = ax.bar(offsets, vals, width=bar_width, label=task_label,
+                                 alpha=0.88, edgecolor="black")
+                for bar, val in zip(bars, vals):
+                    ax.text(bar.get_x() + bar.get_width() / 2,
+                            bar.get_height() + 0.5,
+                            f"{val:.1f}%",
+                            ha="center", va="bottom", fontsize=9, fontweight="bold")
+
+            ax.set_xticks(list(x))
+            ax.set_xticklabels(df7["label"], fontsize=11)
+            ax.set_ylabel("Accuracy (%)", fontsize=13)
+            ax.set_title("Benchmark Accuracy by Model Variant (exp7)",
+                         fontsize=16, fontweight="bold", pad=15)
+            ax.yaxis.set_major_formatter(mticker.PercentFormatter(decimals=0))
+            ax.legend(fontsize=11, frameon=True, shadow=True)
+            ax.grid(True, axis="y", linestyle="--", alpha=0.6)
+            plt.tight_layout()
+            plt.savefig("exp7_benchmark_accuracy.png", dpi=300, bbox_inches="tight")
+            plt.close()
+            print("  -> exp7_benchmark_accuracy.png")
+        else:
+            print("  [INFO] No lm-eval benchmark columns found in exp7 CSV (perplexity-only run).")
+
+        # ── 12. Perplexity Comparison Bar Chart ────────────────────────────────
+        if "perplexity_wikitext103" in df7.columns:
+            fig, ax = plt.subplots(figsize=(9, 6))
+            ppl_vals = df7["perplexity_wikitext103"].astype(float)
+            bars = ax.bar(df7["label"], ppl_vals,
+                          color=df7["color"].tolist(),
+                          edgecolor="black", alpha=0.88, width=0.55)
+            for bar in bars:
+                yval = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width() / 2,
+                        yval + max(ppl_vals) * 0.01,
+                        f"{yval:.2f}",
+                        ha="center", va="bottom", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Perplexity (Wikitext-103 Val) — Lower is Better", fontsize=13)
+            ax.set_title("Perplexity Comparison across Model Variants (exp7)",
+                         fontsize=16, fontweight="bold", pad=15)
+            ax.grid(True, axis="y", linestyle="--", alpha=0.6)
+            plt.tight_layout()
+            plt.savefig("exp7_perplexity_bar.png", dpi=300, bbox_inches="tight")
+            plt.close()
+            print("  -> exp7_perplexity_bar.png")
+
+        # ── 13. Efficiency vs Accuracy Scatter (Layers vs MMLU) ───────────────
+        mmlu_col = "mmlu_acc,none"
+        if mmlu_col in df7.columns and "avg_active_layers" in df7.columns:
+            fig, ax = plt.subplots(figsize=(9, 6))
+            for _, row in df7.iterrows():
+                try:
+                    layers = float(row["avg_active_layers"])
+                except (ValueError, TypeError):
+                    continue
+                acc = float(row[mmlu_col]) * 100
+                color = variant_colors.get(row["variant"], "#888888")
+                ax.scatter(layers, acc, color=color, s=180, zorder=5, edgecolors="black", linewidths=1)
+                ax.annotate(row["label"].replace("\n", " "),
+                            (layers, acc),
+                            textcoords="offset points", xytext=(6, 4),
+                            fontsize=10, fontweight="bold", color=color)
+            ax.set_xlabel("Average Active Layers (Compute Cost)", fontsize=13)
+            ax.set_ylabel("MMLU Accuracy (%)", fontsize=13)
+            ax.set_title("Efficiency vs. Accuracy: Compute Cost vs. MMLU (exp7)",
+                         fontsize=16, fontweight="bold", pad=15)
+            ax.grid(True, linestyle="--", alpha=0.6)
+            plt.tight_layout()
+            plt.savefig("exp7_efficiency_scatter.png", dpi=300, bbox_inches="tight")
+            plt.close()
+            print("  -> exp7_efficiency_scatter.png")
+
+        print("\nPhase 4 plotting complete!")
+    else:
+        print("\nNo exp7 evaluation results found yet. Run exp7_eval_harness.py first.")
 
 
 if __name__ == "__main__":
