@@ -27,8 +27,26 @@ The suite consists of three pure PyTorch fine-tuning loops built on `TinyLlama-1
    - Proves linear speedup in Tokens Per Second (TPS) as the dynamic router drops layers.
 
 5. **`exp5_pareto_sweep.py`**
-   - Executes an automated hyperparameter sweep over the `COMPUTE_PENALTY`.
+   - Executes an automated hyperparameter sweep over the `COMPUTE_PENALTY` using the original REINFORCE router.
    - Generates the data required to plot the Accuracy vs. Compute Pareto Frontier.
 
+## Phase 3: Production-Grade Gumbel Router
+
+6. **`exp6_gumbel_router.py`**
+   - Replaces the high-variance REINFORCE estimator with a **Gumbel-Softmax Straight-Through Estimator (STE)** for fully differentiable, end-to-end training.
+   - Upgrades routing granularity from batch-level to **per-sample** gates (each sample independently decides which layers to execute).
+   - Router reads **contextual hidden states** (post layer 4) rather than raw embeddings.
+   - Integrates a **Knowledge Distillation (KD) loss** using the frozen Baseline (exp1) as teacher.
+   - Scales training to **Wikitext-103-raw-v1** (10,000 samples) for 3 epochs.
+   - Implements model checkpointing (saves LoRA adapter + router weights on best val loss).
+   - **Status:** Completed. 3-epoch run on Wikitext-103 achieved stable convergence and high-fidelity Pareto data.
+
+### Planned Next Experiments
+- **`exp7_gumbel_pareto_sweep.py`** *(Planned)*: Pareto sweep using the exp6 Gumbel-STE architecture to generate a Pareto frontier comparable to exp5 but with the improved router.
+- **`exp8_token_level_routing.py`** *(Planned)*: Token-level (rather than sequence-level) routing — individual tokens independently exit or skip layers.
+- **Evaluation Harness** *(Planned)*: Integration with EleutherAI's `lm-evaluation-harness` for zero-shot MMLU, GSM8K, and ARC-Challenge benchmarks.
+
 ## Analysis & Visualization
-- **`plot_results.py`**: Automatically parses the generated metric CSVs from all five experiments and generates **7 publication-ready visualizations** (including Dual-Axis plots, Convergence trajectories, Final metric Bar Charts, and the Ultimate Pareto Frontier) to comprehensively support the research hypothesis.
+- **`plot_results.py`**: Automatically parses the generated metric CSVs from all experiments and generates publication-ready visualizations:
+  - **Phase 1-2 (7 plots):** Convergence lines, final bar charts, inference speedup, and the Pareto Frontier curve.
+  - **Phase 3 (3 additional plots):** Loss component breakdown (CE + KD + Gate), Gumbel temperature annealing, and a head-to-head val loss comparison across all 4 experiments.

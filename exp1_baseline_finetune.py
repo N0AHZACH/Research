@@ -110,8 +110,12 @@ for epoch in range(EPOCHS):
             # Logging & Eval
             if global_step % 10 == 0:
                 current_train_loss = loss.item() * GRAD_ACCUM
-                
-                # Evaluate every 50 steps
+
+                # Evaluate every 50 steps — update val_loss_str, then write one
+                # CSV row (eval branch).  The else-branch writes the row for
+                # non-eval log steps.  This prevents the duplicate-row bug
+                # where both the eval block and the outer logger wrote a row
+                # at the same global step.
                 if global_step % 50 == 0:
                     model.eval()
                     total_val_loss = 0.0
@@ -120,13 +124,13 @@ for epoch in range(EPOCHS):
                             val_batch = {k: v.to("cuda") for k, v in val_batch.items()}
                             val_outputs = model(**val_batch)
                             total_val_loss += val_outputs.loss.item()
-                    
+
                     val_loss = total_val_loss / len(eval_loader)
                     val_loss_str = f"{val_loss:.4f}"
                     model.train()
-                
+
                 print(f"Step {global_step} | Train Loss: {current_train_loss:.4f} | Val Loss: {val_loss_str or 'N/A'}")
-                
+
                 with open(CSV_FILENAME, "a", newline="") as f:
                     writer = csv.writer(f)
                     writer.writerow([f"{epoch+1}", global_step, f"{current_train_loss:.4f}", val_loss_str])

@@ -4,7 +4,15 @@ import glob
 import os
 
 def get_latest_csv(prefix):
-    files = glob.glob(f"{prefix}_*.csv") if "inference_benchmark" in prefix else glob.glob(f"{prefix}_metrics_*.csv")
+    """Return the most recently modified CSV matching the given prefix pattern."""
+    if "inference_benchmark" in prefix:
+        files = glob.glob(f"{prefix}_*.csv")
+    else:
+        files = glob.glob(f"{prefix}_metrics_*.csv")
+    if not files:
+        return None
+    # Filter out empty files (header-only runs that crashed early)
+    files = [f for f in files if os.path.getsize(f) > 200]
     if not files:
         return None
     files.sort(key=os.path.getmtime, reverse=True)
@@ -187,6 +195,107 @@ def main():
         plt.savefig('pareto_sweep_bar.png', dpi=300, bbox_inches='tight')
 
     print("\nPlotting complete! 7 distinct visualizations have been generated for your paper.")
+
+    # =========================================================================
+    # PHASE 3 GRAPHS (Gumbel Router — exp6)
+    # =========================================================================
+    exp6_file = get_latest_csv("exp6_gumbel")
+    if exp6_file:
+        print(f"\nFound exp6 Gumbel metrics: {exp6_file}")
+        df6 = pd.read_csv(exp6_file)
+
+        # Drop rows where Training Loss is missing or invalid
+        df6 = df6.dropna(subset=["Training Loss"])
+        df6["Training Loss"] = pd.to_numeric(df6["Training Loss"], errors="coerce")
+        df6["CE Loss"]       = pd.to_numeric(df6["CE Loss"],       errors="coerce")
+        df6["KD Loss"]       = pd.to_numeric(df6["KD Loss"],       errors="coerce")
+        df6["Gate Loss"]     = pd.to_numeric(df6["Gate Loss"],     errors="coerce")
+        df6["Gumbel Temp"]   = pd.to_numeric(df6["Gumbel Temp"],   errors="coerce")
+        df6["Avg Active Layers"] = pd.to_numeric(df6["Avg Active Layers"], errors="coerce")
+        df6["Validation Loss"]   = pd.to_numeric(df6["Validation Loss"],   errors="coerce")
+
+        # ------------------------------------------------------------------
+        # 8. Loss Component Breakdown (CE + KD + Gate over training steps)
+        # ------------------------------------------------------------------
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(df6["Global Step"], df6["CE Loss"].ewm(alpha=0.2).mean(),
+                label="CE Loss", color="#1f77b4", linewidth=2)
+        ax.plot(df6["Global Step"], df6["KD Loss"].ewm(alpha=0.2).mean(),
+                label="KD Loss (teacher distillation)", color="#ff7f0e", linewidth=2)
+        ax.plot(df6["Global Step"], df6["Gate Loss"].ewm(alpha=0.2).mean(),
+                label="Gate Sparsity Loss", color="#2ca02c", linewidth=2)
+        ax.set_title("Exp6: Loss Component Breakdown (Gumbel Router)",
+                     fontsize=16, fontweight="bold", pad=15)
+        ax.set_xlabel("Global Step", fontsize=14)
+        ax.set_ylabel("Loss", fontsize=14)
+        ax.legend(fontsize=12, frameon=True, shadow=True)
+        ax.grid(True, linestyle="--", alpha=0.7)
+        plt.tight_layout()
+        plt.savefig("exp6_loss_breakdown.png", dpi=300, bbox_inches="tight")
+        plt.close()
+        print("  -> exp6_loss_breakdown.png")
+
+        # ------------------------------------------------------------------
+        # 9. Gumbel Temperature Annealing Curve
+        # ------------------------------------------------------------------
+        fig, ax1 = plt.subplots(figsize=(10, 5))
+        color_temp = "#9467bd"
+        ax1.plot(df6["Global Step"], df6["Gumbel Temp"],
+                 color=color_temp, linewidth=2.5, marker="o", markersize=4)
+        ax1.set_xlabel("Global Step", fontsize=14)
+        ax1.set_ylabel("Gumbel Temperature", fontsize=14, color=color_temp)
+        ax1.tick_params(axis="y", labelcolor=color_temp)
+        ax1.set_ylim(0, 1.1)
+
+        ax2 = ax1.twinx()
+        valid_layers = df6["Avg Active Layers"].dropna()
+        valid_steps  = df6.loc[valid_layers.index, "Global Step"]
+        ax2.plot(valid_steps, valid_layers, color="#17becf",
+                 linewidth=2.5, linestyle="--", marker="s", markersize=4,
+                 label="Avg Active Layers")
+        ax2.set_ylabel("Avg Active Layers", fontsize=14, color="#17becf")
+        ax2.tick_params(axis="y", labelcolor="#17becf")
+
+        plt.title("Gumbel Temperature Annealing vs. Avg Active Layers",
+                  fontsize=16, fontweight="bold", pad=15)
+        fig.tight_layout()
+        plt.savefig("exp6_temp_annealing.png", dpi=300, bbox_inches="tight")
+        plt.close()
+        print("  -> exp6_temp_annealing.png")
+
+        # ------------------------------------------------------------------
+        # 10. Head-to-head Validation Loss: Baseline vs Stochastic vs
+        #     Dynamic (REINFORCE) vs Gumbel Router
+        # ------------------------------------------------------------------
+        # Pull eval rows from each Phase 1 experiment
+        val6 = df6.dropna(subset=["Validation Loss"]).copy()
+
+        if not val6.empty:
+            plt.figure(figsize=(12, 6))
+            plt.plot(val1["Global Step"], val1["Validation Loss"],
+                     label="Baseline (exp1)", color=colors[0], linewidth=2.5, marker="o", markersize=5)
+            plt.plot(val2["Global Step"], val2["Validation Loss"],
+                     label="Stochastic (exp2)", color=colors[1], linewidth=2.5, marker="s", markersize=5)
+            plt.plot(val3["Global Step"], val3["Validation Loss"],
+                     label="Dynamic-REINFORCE (exp3)", color=colors[2], linewidth=2.5, marker="^", markersize=5)
+            plt.plot(val6["Global Step"], val6["Validation Loss"],
+                     label="Gumbel-STE Router (exp6)", color="#9467bd", linewidth=2.5,
+                     marker="D", markersize=6, linestyle="--")
+            plt.title("Validation Loss: All Experiments (Phase 1-3)",
+                      fontsize=16, fontweight="bold", pad=15)
+            plt.xlabel("Global Step", fontsize=14)
+            plt.ylabel("Validation Loss", fontsize=14)
+            plt.legend(fontsize=12, frameon=True, shadow=True)
+            plt.grid(True, linestyle="--", alpha=0.7)
+            plt.tight_layout()
+            plt.savefig("all_experiments_val_loss.png", dpi=300, bbox_inches="tight")
+            plt.close()
+            print("  -> all_experiments_val_loss.png")
+
+        print(f"\nPhase 3 plotting complete! Generated 3 additional exp6 visualizations.")
+    else:
+        print("\nNo exp6 Gumbel metrics found (all runs were empty / crashed). Skipping Phase 3 plots.")
+
 
 if __name__ == "__main__":
     main()
