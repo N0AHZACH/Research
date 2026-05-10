@@ -7,6 +7,7 @@ Fixes over exp3 (REINFORCE baseline):
   Fix 3: Contextual hidden states - router reads h_4 (post always-kept layers), not raw embeddings
   Fix 4: Scaled dataset        - wikitext-103-raw-v1, 3 epochs
   Fix 5: Model checkpointing   - saves LoRA adapter + router weights after training
+  Fix 6: Router in optimizer   - router params included in AdamW via itertools.chain
 
 Implementation note: We use forward hooks to intercept and gate layer outputs.
 This lets the model handle all internal details (rotary embeddings, SDPA masking)
@@ -14,6 +15,7 @@ while we surgically apply per-sample skip-connection gates.
 """
 import csv
 import os
+import itertools
 import datetime
 import torch
 import torch.nn as nn
@@ -160,8 +162,12 @@ model.router = GumbelRouter(model.config.hidden_size, ROUTABLE_LAYERS).to("cuda"
 for p in model.router.parameters():
     p.requires_grad = True
 
+# Fix 6: Include router parameters in the optimizer so they are actually updated.
+# Previously only model.parameters() (LoRA) were passed, leaving the router
+# weights frozen despite requires_grad=True. Using itertools.chain combines both
+# parameter sets into a single iterable without creating a new list copy.
 optimizer = torch.optim.AdamW(
-    model.parameters(),
+    itertools.chain(model.parameters(), model.router.parameters()),
     lr=LR, weight_decay=WEIGHT_DECAY,
 )
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(

@@ -28,85 +28,108 @@ def main():
     exp2_file = get_latest_csv("exp2_stochastic")
     exp3_file = get_latest_csv("exp3_dynamic")
 
-    if not all([exp1_file, exp2_file, exp3_file]):
-        print("Missing one or more Phase 1 experiment CSV files.")
-        return
-
-    print("Loading data...")
-    df1 = pd.read_csv(exp1_file)
-    df2 = pd.read_csv(exp2_file)
-    df3 = pd.read_csv(exp3_file)
-
-    val1 = df1[df1['Global Step'] % 50 == 0].copy()
-    val2 = df2[df2['Global Step'] % 50 == 0].copy()
-    val3 = df3[df3['Global Step'] % 50 == 0].copy()
-
-    final_val1 = val1['Validation Loss'].iloc[-1]
-    final_val2 = val2['Validation Loss'].iloc[-1]
-    final_val3 = val3['Validation Loss'].iloc[-1]
-
-    final_train1 = df1['Training Loss'].iloc[-1]
-    final_train2 = df2['Training Loss'].iloc[-1]
-    final_train3 = df3['Training Loss'].iloc[-1]
-
-    labels = ['Baseline\n(Full Layers)', 'Stochastic\n(50% Drop)', 'Dynamic\n(Gating)']
+    # Phase 1 CSVs (exp1 baseline, exp2 stochastic, exp3 REINFORCE dynamic)
+    phase1_available = all([exp1_file, exp2_file, exp3_file])
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
-    
+    labels = ['Baseline\n(Full Layers)', 'Stochastic\n(50% Drop)', 'Dynamic\n(REINFORCE)']
+
     plt.style.use('seaborn-v0_8-darkgrid' if 'seaborn-v0_8-darkgrid' in plt.style.available else 'default')
 
+    # Shared variables used by both Phase 1 plots and the all-experiments comparison below
+    val1 = val2 = val3 = None
+    df1 = df2 = df3 = None
+    final_val1 = final_val2 = None
+
+    if not phase1_available:
+        missing = [n for n, f in [("exp1", exp1_file), ("exp2", exp2_file), ("exp3", exp3_file)] if not f]
+        print(f"  [INFO] Phase 1 plots skipped — missing CSVs: {missing}")
+        print(f"         Phase 3/4 plots will still be generated.")
+        # Load whatever is available for the all-experiments comparison
+        if exp1_file:
+            df1 = pd.read_csv(exp1_file)
+            val1 = df1[df1['Global Step'] % 50 == 0].copy()
+            final_val1 = val1['Validation Loss'].dropna().iloc[-1] if not val1['Validation Loss'].dropna().empty else None
+        if exp2_file:
+            df2 = pd.read_csv(exp2_file)
+            val2 = df2[df2['Global Step'] % 50 == 0].copy()
+            final_val2 = val2['Validation Loss'].dropna().iloc[-1] if not val2['Validation Loss'].dropna().empty else None
+    else:
+        print("Loading Phase 1 data...")
+        df1 = pd.read_csv(exp1_file)
+        df2 = pd.read_csv(exp2_file)
+        df3 = pd.read_csv(exp3_file)
+
+        val1 = df1[df1['Global Step'] % 50 == 0].copy()
+        val2 = df2[df2['Global Step'] % 50 == 0].copy()
+        val3 = df3[df3['Global Step'] % 50 == 0].copy()
+
+        final_val1 = val1['Validation Loss'].dropna().iloc[-1]
+        final_val2 = val2['Validation Loss'].dropna().iloc[-1]
+        final_val3 = val3['Validation Loss'].dropna().iloc[-1]
+
+        final_train1 = df1['Training Loss'].iloc[-1]
+        final_train2 = df2['Training Loss'].iloc[-1]
+        final_train3 = df3['Training Loss'].iloc[-1]
+
     # =========================================================================
-    # PHASE 1 GRAPHS (Convergence Lines + Final Bars)
+    # PHASE 1 GRAPHS (Convergence Lines + Final Bars) — only if all 3 CSVs present
     # =========================================================================
-    
-    # 1. Validation Loss Convergence (Line Graph)
-    plt.figure(figsize=(10, 6))
-    plt.plot(val1['Global Step'], val1['Validation Loss'], label='Baseline', marker='o', linewidth=2.5, markersize=6, color=colors[0])
-    plt.plot(val2['Global Step'], val2['Validation Loss'], label='Stochastic', marker='s', linewidth=2.5, markersize=6, color=colors[1])
-    plt.plot(val3['Global Step'], val3['Validation Loss'], label='Dynamic', marker='^', linewidth=2.5, markersize=6, color=colors[2])
-    plt.title('Validation Loss Convergence over Time', fontsize=16, fontweight='bold', pad=15)
-    plt.xlabel('Global Step', fontsize=14)
-    plt.ylabel('Validation Loss', fontsize=14)
-    plt.legend(fontsize=12, frameon=True, shadow=True)
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    plt.savefig('validation_loss_convergence.png', dpi=300, bbox_inches='tight')
+    if phase1_available:
+        # 1. Validation Loss Convergence (Line Graph)
+        plt.figure(figsize=(10, 6))
+        plt.plot(val1['Global Step'], val1['Validation Loss'], label='Baseline', marker='o', linewidth=2.5, markersize=6, color=colors[0])
+        plt.plot(val2['Global Step'], val2['Validation Loss'], label='Stochastic', marker='s', linewidth=2.5, markersize=6, color=colors[1])
+        plt.plot(val3['Global Step'], val3['Validation Loss'], label='Dynamic', marker='^', linewidth=2.5, markersize=6, color=colors[2])
+        plt.title('Validation Loss Convergence over Time', fontsize=16, fontweight='bold', pad=15)
+        plt.xlabel('Global Step', fontsize=14)
+        plt.ylabel('Validation Loss', fontsize=14)
+        plt.legend(fontsize=12, frameon=True, shadow=True)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        plt.savefig('validation_loss_convergence.png', dpi=300, bbox_inches='tight')
+        plt.close()
 
-    # 2. Final Validation Loss (Bar Chart)
-    plt.figure(figsize=(9, 6))
-    bars = plt.bar(labels, [final_val1, final_val2, final_val3], color=colors, edgecolor='black', alpha=0.85, width=0.6)
-    plt.title('Final Validation Loss Comparison', fontsize=16, fontweight='bold', pad=15)
-    plt.ylabel('Validation Loss (Lower is Better)', fontsize=14)
-    plt.grid(True, axis='y', linestyle='--', alpha=0.7)
-    for bar in bars:
-        yval = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2, yval + 0.05, f'{yval:.4f}', ha='center', va='bottom', fontsize=12, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig('validation_loss_final_bar.png', dpi=300, bbox_inches='tight')
+        # 2. Final Validation Loss (Bar Chart)
+        plt.figure(figsize=(9, 6))
+        bars = plt.bar(labels, [final_val1, final_val2, final_val3], color=colors, edgecolor='black', alpha=0.85, width=0.6)
+        plt.title('Final Validation Loss Comparison', fontsize=16, fontweight='bold', pad=15)
+        plt.ylabel('Validation Loss (Lower is Better)', fontsize=14)
+        plt.grid(True, axis='y', linestyle='--', alpha=0.7)
+        for bar in bars:
+            yval = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width()/2, yval + 0.05, f'{yval:.4f}', ha='center', va='bottom', fontsize=12, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig('validation_loss_final_bar.png', dpi=300, bbox_inches='tight')
+        plt.close()
 
-    # 3. Training Loss Trajectory (Line Graph)
-    plt.figure(figsize=(10, 6))
-    plt.plot(df1['Global Step'], df1['Training Loss'].ewm(alpha=0.1).mean(), label='Baseline', linewidth=2.5, color=colors[0])
-    plt.plot(df2['Global Step'], df2['Training Loss'].ewm(alpha=0.1).mean(), label='Stochastic', linewidth=2.5, color=colors[1])
-    plt.plot(df3['Global Step'], df3['Training Loss'].ewm(alpha=0.1).mean(), label='Dynamic', linewidth=2.5, color=colors[2])
-    plt.title('Smoothed Training Loss Trajectory (EWMA)', fontsize=16, fontweight='bold', pad=15)
-    plt.xlabel('Global Step', fontsize=14)
-    plt.ylabel('Training Loss', fontsize=14)
-    plt.legend(fontsize=12, frameon=True, shadow=True)
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    plt.savefig('training_loss_trajectory.png', dpi=300, bbox_inches='tight')
+        # 3. Training Loss Trajectory (Line Graph)
+        plt.figure(figsize=(10, 6))
+        plt.plot(df1['Global Step'], df1['Training Loss'].ewm(alpha=0.1).mean(), label='Baseline', linewidth=2.5, color=colors[0])
+        plt.plot(df2['Global Step'], df2['Training Loss'].ewm(alpha=0.1).mean(), label='Stochastic', linewidth=2.5, color=colors[1])
+        plt.plot(df3['Global Step'], df3['Training Loss'].ewm(alpha=0.1).mean(), label='Dynamic', linewidth=2.5, color=colors[2])
+        plt.title('Smoothed Training Loss Trajectory (EWMA)', fontsize=16, fontweight='bold', pad=15)
+        plt.xlabel('Global Step', fontsize=14)
+        plt.ylabel('Training Loss', fontsize=14)
+        plt.legend(fontsize=12, frameon=True, shadow=True)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        plt.savefig('training_loss_trajectory.png', dpi=300, bbox_inches='tight')
+        plt.close()
 
-    # 4. Final Training Loss (Bar Chart)
-    plt.figure(figsize=(9, 6))
-    bars = plt.bar(labels, [final_train1, final_train2, final_train3], color=colors, edgecolor='black', alpha=0.85, width=0.6)
-    plt.title('Final Training Loss Comparison', fontsize=16, fontweight='bold', pad=15)
-    plt.ylabel('Training Loss (Lower is Better)', fontsize=14)
-    plt.grid(True, axis='y', linestyle='--', alpha=0.7)
-    for bar in bars:
-        yval = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2, yval + 0.05, f'{yval:.4f}', ha='center', va='bottom', fontsize=12, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig('training_loss_final_bar.png', dpi=300, bbox_inches='tight')
+        # 4. Final Training Loss (Bar Chart)
+        plt.figure(figsize=(9, 6))
+        bars = plt.bar(labels, [final_train1, final_train2, final_train3], color=colors, edgecolor='black', alpha=0.85, width=0.6)
+        plt.title('Final Training Loss Comparison', fontsize=16, fontweight='bold', pad=15)
+        plt.ylabel('Training Loss (Lower is Better)', fontsize=14)
+        plt.grid(True, axis='y', linestyle='--', alpha=0.7)
+        for bar in bars:
+            yval = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width()/2, yval + 0.05, f'{yval:.4f}', ha='center', va='bottom', fontsize=12, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig('training_loss_final_bar.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print("  -> Phase 1 plots done (4 figures).")
 
     # =========================================================================
     # PHASE 2 GRAPHS (Pareto Sweep and Inference)
@@ -276,12 +299,15 @@ def main():
 
         if not val6.empty:
             plt.figure(figsize=(12, 6))
-            plt.plot(val1["Global Step"], val1["Validation Loss"],
-                     label="Baseline (exp1)", color=colors[0], linewidth=2.5, marker="o", markersize=5)
-            plt.plot(val2["Global Step"], val2["Validation Loss"],
-                     label="Stochastic (exp2)", color=colors[1], linewidth=2.5, marker="s", markersize=5)
-            plt.plot(val3["Global Step"], val3["Validation Loss"],
-                     label="Dynamic-REINFORCE (exp3)", color=colors[2], linewidth=2.5, marker="^", markersize=5)
+            if val1 is not None:
+                plt.plot(val1["Global Step"], val1["Validation Loss"],
+                         label="Baseline (exp1)", color=colors[0], linewidth=2.5, marker="o", markersize=5)
+            if val2 is not None:
+                plt.plot(val2["Global Step"], val2["Validation Loss"],
+                         label="Stochastic (exp2)", color=colors[1], linewidth=2.5, marker="s", markersize=5)
+            if val3 is not None:
+                plt.plot(val3["Global Step"], val3["Validation Loss"],
+                         label="Dynamic-REINFORCE (exp3)", color=colors[2], linewidth=2.5, marker="^", markersize=5)
             plt.plot(val6["Global Step"], val6["Validation Loss"],
                      label="Gumbel-STE Router (exp6)", color="#9467bd", linewidth=2.5,
                      marker="D", markersize=6, linestyle="--")
