@@ -24,7 +24,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from datasets import load_dataset
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, TaskType
 from tqdm import tqdm
 
@@ -201,8 +201,23 @@ def train_one_penalty(penalty: float, teacher_model, base_model) -> dict:
 def main():
     print("\n--- FAST PARETO SWEEP ---")
     base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda", attn_implementation=ATTN_IMPL)
-    print("Loading 8-bit Teacher...")
-    teacher_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, load_in_8bit=True, device_map="cuda", attn_implementation=ATTN_IMPL)
+    print("Loading Teacher (8-bit if available)...")
+    try:
+        quant_config = BitsAndBytesConfig(load_in_8bit=True)
+        teacher_model = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID, 
+            quantization_config=quant_config,
+            device_map="cuda", 
+            attn_implementation=ATTN_IMPL
+        )
+    except Exception as e:
+        print(f"[INFO] 8-bit loading skipped ({e}). Using bf16.")
+        teacher_model = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID, 
+            torch_dtype=torch.bfloat16, 
+            device_map="cuda", 
+            attn_implementation=ATTN_IMPL
+        )
     teacher_model.eval()
     if ATTN_IMPL == "sdpa":
         try: teacher_model = torch.compile(teacher_model)
