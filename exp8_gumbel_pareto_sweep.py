@@ -60,11 +60,13 @@ if args.fast:
     MAX_EVAL_BATCHES = 50
     print("[FAST MODE] 1 epoch, 1000 train samples — sanity check only")
 else:
-    # Match exp6 exactly for fair Pareto comparison
+    # Standard Research Mode (Full 3-Epoch Training)
     TRAIN_SAMPLES    = 10_000
     EVAL_SAMPLES     = 1_000
     EPOCHS           = 3
     MAX_EVAL_BATCHES = 100
+
+
 
 BATCH_SIZE       = 2
 GRAD_ACCUM       = 8
@@ -96,12 +98,12 @@ def get_optimal_config():
     torch.backends.cudnn.allow_tf32 = True
 
     if vram_gb >= 15:
-        # RTX 4000 20GB or similar server-grade
-        bs = 8   # Lowered from 16 to prevent OOM (Teacher + 2-pass overhead)
-        ga = 2   # Adjusted to keep effective batch size at 16
-        nw = min(cpu_count // 2, 8)  # Utilize the i9-13900KF
+        # Standard Server Mode (Safe for 3-epoch runs)
+        bs = 8   # Matches exp6 for consistency
+        ga = 2   # Effective BS = 16
+        nw = min(cpu_count // 2, 12)
         attn = "sdpa"
-        print(f"[SERVER MODE] Detected {vram_gb:.1f}GB VRAM. Scaling: BS={bs}, GA={ga}, Workers={nw}, SDPA=ON")
+        print(f"[SERVER MODE] Standard 3-Epoch Mode: BS={bs}, GA={ga}, Workers={nw}, SDPA=ON, Compile=ON")
     else:
         # RTX 4060 8GB or similar
         bs = 2
@@ -442,9 +444,12 @@ def main():
     )
     
     # Shared frozen teacher
+    print("\nLoading frozen Teacher model for KD...")
     teacher_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda",
-        attn_implementation=ATTN_IMPL
+        MODEL_ID, 
+        torch_dtype=torch.bfloat16, 
+        device_map="cuda",
+        attn_implementation=ATTN_IMPL,
     )
     for p in teacher_model.parameters():
         p.requires_grad = False
