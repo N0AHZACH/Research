@@ -59,6 +59,40 @@ KD_WARMUP_STEPS  = 50
 EVAL_EVERY_STEPS = 100
 LOG_EVERY_STEPS  = 20
 
+# ---------------------------------------------------------------------------
+# Hardware Auto-Optimisation (Server Mode)
+# ---------------------------------------------------------------------------
+def get_optimal_config():
+    """Detects hardware and returns optimized training parameters."""
+    if not torch.cuda.is_available():
+        return 2, 8, 0, None  # Default fallback
+
+    vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    cpu_count = os.cpu_count() or 4
+    
+    # Enable TF32 for Ampere+ GPUs (RTX 3000/4000)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+    if vram_gb >= 15:
+        # RTX 4000 20GB or similar server-grade
+        bs = 16
+        ga = 1  # No accumulation needed at bs=16 for TinyLlama
+        nw = min(cpu_count // 2, 8)  # Utilize the i9-13900KF
+        attn = "flash_attention_2"
+        print(f"[SERVER MODE] Detected {vram_gb:.1f}GB VRAM. Scaling: BS={bs}, GA={ga}, Workers={nw}, FlashAttention=ON")
+    else:
+        # RTX 4060 8GB or similar
+        bs = 2
+        ga = 8
+        nw = 0  # Windows workers can be flaky on laptops
+        attn = None
+        print(f"[DESKTOP MODE] Detected {vram_gb:.1f}GB VRAM. Using safe defaults: BS={bs}, GA={ga}")
+    
+    return bs, ga, nw, attn
+
+BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL = get_optimal_config()
+
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CSV_FILENAME = f"exp6_gumbel_metrics_{TIMESTAMP}.csv"
 SAVE_DIR     = f"exp6_gumbel_output_{TIMESTAMP}"
@@ -88,18 +122,34 @@ eval_ds  = eval_raw.map(tokenize, batched=True, remove_columns=eval_raw.column_n
 train_ds.set_format("torch")
 eval_ds.set_format("torch")
 
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-eval_loader  = DataLoader(eval_ds,  batch_size=BATCH_SIZE, shuffle=False)
+train_loader = DataLoader(
+    train_ds, batch_size=BATCH_SIZE, shuffle=True, 
+    num_workers=NUM_WORKERS, pin_memory=True
+)
+eval_loader  = DataLoader(
+    eval_ds,  batch_size=BATCH_SIZE, shuffle=False,
+    num_workers=NUM_WORKERS, pin_memory=True
+)
 print(f"  Train: {len(train_ds)} | Eval: {len(eval_ds)}")
 
 # ==============================================================================
 # Models: Student (LoRA) + Teacher (Frozen) for KD
 # ==============================================================================
 print("\nLoading TinyLlama student (LoRA) ...")
-base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda")
+base_model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID, 
+    torch_dtype=torch.bfloat16, 
+    device_map="cuda",
+    attn_implementation=ATTN_IMPL,
+)
 
 print("Loading frozen Teacher for KD ...")
-teacher_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda")
+teacher_model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID, 
+    torch_dtype=torch.bfloat16, 
+    device_map="cuda",
+    attn_implementation=ATTN_IMPL,
+)
 for p in teacher_model.parameters():
     p.requires_grad = False
 teacher_model.eval()

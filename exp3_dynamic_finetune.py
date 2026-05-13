@@ -22,9 +22,41 @@ TRAIN_SAMPLES   = 2500
 EVAL_SAMPLES    = 500
 
 EPOCHS          = 1
-BATCH_SIZE      = 2
-GRAD_ACCUM      = 4
 LR              = 5e-5
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Hardware Auto-Optimisation (Server Mode)
+# ──────────────────────────────────────────────────────────────────────────────
+def get_optimal_config():
+    """Detects hardware and returns optimized training parameters."""
+    if not torch.cuda.is_available():
+        return 2, 4, 0, None  # Default fallback
+
+    vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    cpu_count = os.cpu_count() or 4
+    
+    # Enable TF32 for Ampere+ GPUs (RTX 3000/4000)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+    if vram_gb >= 15:
+        # RTX 4000 20GB or similar server-grade
+        bs = 16
+        ga = 1  # No accumulation needed at bs=16 for TinyLlama
+        nw = min(cpu_count // 2, 8)  # Utilize the i9-13900KF
+        attn = "flash_attention_2"
+        print(f"[SERVER MODE] Detected {vram_gb:.1f}GB VRAM. Scaling: BS={bs}, GA={ga}, Workers={nw}, FlashAttention=ON")
+    else:
+        # RTX 4060 8GB or similar
+        bs = 2
+        ga = 4
+        nw = 0 
+        attn = None
+        print(f"[DESKTOP MODE] Detected {vram_gb:.1f}GB VRAM. Using safe defaults: BS={bs}, GA={ga}")
+    
+    return bs, ga, nw, attn
+
+BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL = get_optimal_config()
 
 ALWAYS_KEEP     = 4          # first N layers always active
 COMPUTE_PENALTY = 0.05       # REINFORCE penalty per active routed layer
@@ -58,8 +90,15 @@ train_ds.set_format("torch")
 eval_ds.set_format("torch")
 
 data_collator = DataCollatorWithPadding(tokenizer, padding="max_length", max_length=MAX_LENGTH)
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=data_collator)
-eval_loader  = DataLoader(eval_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=data_collator)
+data_collator = DataCollatorWithPadding(tokenizer, padding="max_length", max_length=MAX_LENGTH)
+train_loader = DataLoader(
+    train_ds, batch_size=BATCH_SIZE, shuffle=True, 
+    collate_fn=data_collator, num_workers=NUM_WORKERS, pin_memory=True
+)
+eval_loader  = DataLoader(
+    eval_ds, batch_size=BATCH_SIZE, shuffle=False, 
+    collate_fn=data_collator, num_workers=NUM_WORKERS, pin_memory=True
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Model + LoRA + Global Router
@@ -68,6 +107,7 @@ base_model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     torch_dtype=torch.bfloat16,
     device_map="cuda",
+    attn_implementation=ATTN_IMPL,
 )
 
 lora_cfg = LoraConfig(
