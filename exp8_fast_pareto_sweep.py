@@ -121,14 +121,18 @@ def gated_forward(model, batch, temperature, hard=True):
     with torch.no_grad():
         base = model.base_model.model.model
         h = base.embed_tokens(input_ids)
+        position_ids = torch.arange(0, input_ids.shape[1], device=input_ids.device).unsqueeze(0)
+        position_embeddings = base.rotary_emb(h, position_ids)
         for i in range(ALWAYS_KEEP):
-            h = base.layers[i](h, attention_mask=attention_mask)[0]
+            h = base.layers[i](h, attention_mask=attention_mask, position_embeddings=position_embeddings)[0]
         ctx.gates = model.router(h.mean(dim=1), temperature, hard)
 
     handles = []
-    def hook_fn(module, args, output, layer_idx):
-        gate = ctx.gates[:, layer_idx].view(-1, 1, 1)
-        return (output[0] * gate, *output[1:])
+    def hook_fn(module, input, output, layer_idx):
+        residual = input[0]
+        gate = ctx.gates[:, layer_idx].view(-1, 1, 1).to(output[0].dtype)
+        gated_h = gate * output[0] + (1.0 - gate) * residual
+        return (gated_h, *output[1:])
 
     for i in range(len(ctx.gates[0])):
         h = model.base_model.model.model.layers[i + ALWAYS_KEEP]
