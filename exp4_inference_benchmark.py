@@ -72,6 +72,66 @@ def main():
                 writer = csv.writer(f)
                 writer.writerow([count, f"{tps:.2f}", f"{ms_per_batch:.2f}"])
 
+        # Restore original layers for DLR testing
+        model.model.layers = nn.ModuleList(list(original_layers))
+        
+        # Now run real Gumbel-STE DLR timing
+        print("\nBenchmarking DLR (Gated Two-Pass Inference)...")
+        from exp6_gumbel_router import GumbelRouter, GatedForwardContext
+        
+        ALWAYS_KEEP = 4
+        ROUTABLE = TOTAL_LAYERS - ALWAYS_KEEP
+        
+        # Load a dummy router (untrained) just for timing
+        router = GumbelRouter(model.config.hidden_size, ROUTABLE).to("cuda", dtype=torch.float32)
+        router.eval()
+        
+        def gated_fwd(input_ids):
+            transformer = model.model
+            all_layers  = transformer.layers
+            ctx = GatedForwardContext()
+            ctx.install_capture_hook(all_layers[ALWAYS_KEEP - 1])
+            _ = model(input_ids=input_ids)
+            ctx.remove_hooks()
+            
+            pooled_h = ctx.captured_h.to("cuda")
+            gates    = router(pooled_h, temperature=0.5, hard=True)
+            
+            ctx.install_gate_hooks(all_layers[ALWAYS_KEEP:], gates)
+            out = model(input_ids=input_ids)
+            ctx.remove_hooks()
+            return out, gates
+
+        # Warmup DLR
+        for _ in range(5):
+            gated_fwd(inputs["input_ids"])
+            
+        torch.cuda.synchronize()
+        start_time = time.time()
+        
+        total_active_layers = 0
+        for _ in range(NUM_BATCHES):
+            _, gates = gated_fwd(inputs["input_ids"])
+            total_active_layers += gates.float().mean(dim=0).sum().item() + ALWAYS_KEEP
+            
+        torch.cuda.synchronize()
+        end_time = time.time()
+        
+        total_time = end_time - start_time
+        time_per_batch = total_time / NUM_BATCHES
+        ms_per_batch = time_per_batch * 1000
+        
+        total_tokens = NUM_BATCHES * BATCH_SIZE * MAX_LENGTH
+        tps = total_tokens / total_time
+        
+        avg_layers_used = total_active_layers / NUM_BATCHES
+        
+        print(f"--> DLR Speed: {tps:.2f} Tokens/Sec | Latency: {ms_per_batch:.2f} ms/batch | Avg Layers Used: {avg_layers_used:.1f}")
+        
+        with open(CSV_FILENAME, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([f"DLR ({avg_layers_used:.1f})", f"{tps:.2f}", f"{ms_per_batch:.2f}"])
+
     print(f"\nInference Benchmark complete! Results saved to {CSV_FILENAME}")
 
 if __name__ == "__main__":

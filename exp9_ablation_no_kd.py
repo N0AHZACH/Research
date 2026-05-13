@@ -1,17 +1,8 @@
 """
-exp6_gumbel_router.py - Phase 3: Production-Grade Dynamic Layer Routing
+exp9_ablation_no_kd.py - Ablation: Gumbel Router WITHOUT Knowledge Distillation
 
-Fixes over exp3 (REINFORCE baseline):
-  Fix 1: Per-sample routing    - router scores each sample independently (per-sample gates)
-  Fix 2: Gumbel-Softmax STE    - replaces high-variance REINFORCE; fully differentiable
-  Fix 3: Contextual hidden states - router reads h_4 (post always-kept layers), not raw embeddings
-  Fix 4: Scaled dataset        - wikitext-103-raw-v1, 3 epochs
-  Fix 5: Model checkpointing   - saves LoRA adapter + router weights after training
-  Fix 6: Router in optimizer   - router params included in AdamW via itertools.chain
-
-Implementation note: We use forward hooks to intercept and gate layer outputs.
-This lets the model handle all internal details (rotary embeddings, SDPA masking)
-while we surgically apply per-sample skip-connection gates.
+This script removes the teacher model and the KD loss (α=1.0, CE only) 
+to isolate the contribution of KD to router stability.
 """
 import csv
 import os
@@ -31,9 +22,9 @@ from tqdm import tqdm
 # ==============================================================================
 MODEL_ID         = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 MAX_LENGTH       = 512
-TRAIN_SAMPLES    = 10000
+TRAIN_SAMPLES    = 5000  # Reduced for fast ablation
 EVAL_SAMPLES     = 1000
-EPOCHS           = 3
+EPOCHS           = 1     # Reduced to 1 epoch
 # Max eval batches per evaluation pass. The full 1000-sample eval set at
 # batch_size=2 means 500 batches — far too slow to run every 100 steps.
 # Capping at 100 batches (200 samples) gives a fast, reliable signal.
@@ -45,14 +36,14 @@ LR               = 3e-5
 WEIGHT_DECAY     = 0.01
 
 ALWAYS_KEEP      = 4
-COMPUTE_PENALTY  = 1.0   # Escalated from 0.4 to stop the upward drift to 19+
+COMPUTE_PENALTY  = 0.4   # was 0.05 — raised to compete with T²-scaled KD loss
 GUMBEL_TEMP      = 1.0
 TEMP_ANNEAL_RATE = 0.95
 KD_ALPHA         = 0.5
 KD_TEMPERATURE   = 2.0   # was 3.0 — T² amplification was 9×, now 4×
 # Gate entropy bonus: penalizes gates that are always 0 or always 1.
 # Encourages the router to use the full probability range instead of saturating.
-GATE_ENTROPY_BETA = 0.1  # Escalated from 0.05
+GATE_ENTROPY_BETA = 0.05  # coefficient for the entropy bonus
 # Number of gradient-update steps before KD loss is turned on.
 KD_WARMUP_STEPS  = 50
 
@@ -60,8 +51,8 @@ EVAL_EVERY_STEPS = 100
 LOG_EVERY_STEPS  = 20
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_FILENAME = f"exp6_gumbel_metrics_{TIMESTAMP}.csv"
-SAVE_DIR     = f"exp6_gumbel_output_{TIMESTAMP}"
+CSV_FILENAME = f"exp9_ablation_no_kd_{TIMESTAMP}.csv"
+SAVE_DIR     = f"exp9_ablation_no_kd_output_{TIMESTAMP}"
 
 # ==============================================================================
 # Fix 4: Dataset - Wikitext-103
@@ -97,12 +88,6 @@ print(f"  Train: {len(train_ds)} | Eval: {len(eval_ds)}")
 # ==============================================================================
 print("\nLoading TinyLlama student (LoRA) ...")
 base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda")
-
-print("Loading frozen Teacher for KD ...")
-teacher_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda")
-for p in teacher_model.parameters():
-    p.requires_grad = False
-teacher_model.eval()
 
 lora_cfg = LoraConfig(
     task_type=TaskType.CAUSAL_LM,
@@ -282,15 +267,6 @@ def gated_forward(model, batch, temperature, hard=True):
     return logits, ce_loss, gates
 
 
-def compute_kd_loss(s_logits, t_logits, T):
-    """KL-Divergence KD loss with temperature T."""
-    return F.kl_div(
-        F.log_softmax(s_logits / T, dim=-1),
-        F.softmax(t_logits  / T, dim=-1),
-        reduction="batchmean",
-    ) * (T ** 2)
-
-
 # ==============================================================================
 # CSV Logging Setup
 # ==============================================================================
@@ -322,41 +298,19 @@ for epoch in range(EPOCHS):
         # Student forward (gated)
         student_logits, ce_loss, gates = gated_forward(model, batch, temperature=current_temp, hard=True)
 
-        # Teacher forward (frozen)
-        with torch.no_grad():
-            teacher_logits = teacher_model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch.get("attention_mask"),
-            ).logits
-
         # Sparsity loss: penalize fraction of gates active
         gate_loss = gates.float().mean() * COMPUTE_PENALTY
 
-        # Gate entropy bonus: rewards a gate distribution that uses the full [0,1]
-        # range rather than collapsing to "always 1" (router avoidance of penalty).
-        # We use the per-sample mean gate activation as a Bernoulli probability proxy.
-        # H(p) = -p*log(p) - (1-p)*log(1-p) is maximized at p=0.5. Subtracting this
-        # from the loss encourages the router to keep gates near 50%, creating pressure
-        # that opposes both the KD loss (which drives gates to 1) and the sparsity
-        # penalty (which drives gates to 0).
+        # Gate entropy bonus
         p_mean = gates.detach().float().mean()  # scalar, ∈ [0,1]
         eps = 1e-6
         gate_entropy = -(p_mean * (p_mean + eps).log() + (1 - p_mean) * (1 - p_mean + eps).log())
         entropy_bonus = GATE_ENTROPY_BETA * gate_entropy  # subtract → maximizes entropy
 
-        # KD + combined loss.
-        # During warmup (global_step < KD_WARMUP_STEPS): pure CE + gate only.
-        #   Rationale: T²-scaled KL divergence explodes when the student logits
-        #   are far from the teacher early in training (observed KD=1864 at step 20).
-        #   Running pure CE for the first KD_WARMUP_STEPS optimizer steps lets the
-        #   student converge enough that KD gradients are meaningful, not destructive.
-        # After warmup: blended alpha*CE + (1-alpha)*KD + gate.
-        if global_step < KD_WARMUP_STEPS:
-            kd_loss    = torch.tensor(0.0, device="cuda")  # not computed, log as 0
-            total_loss = (ce_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
-        else:
-            kd_loss    = compute_kd_loss(student_logits[:, :-1, :], teacher_logits[:, :-1, :], KD_TEMPERATURE)
-            total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
+        # NO KD LOSS: Just CE + Gate Loss
+        kd_loss = torch.tensor(0.0, device="cuda")
+        total_loss = (ce_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
+        
         total_loss.backward()
 
         if (step + 1) % GRAD_ACCUM == 0 or (step + 1) == len(train_loader):

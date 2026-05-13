@@ -18,6 +18,7 @@ Usage:
 """
 
 import os
+import itertools
 import csv
 import datetime
 import argparse
@@ -48,8 +49,8 @@ MODEL_ID     = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 MAX_LENGTH   = 512
 ALWAYS_KEEP  = 4
 
-# Sweep parameters
-PENALTIES    = [0.01, 0.02, 0.05, 0.10, 0.20, 0.40]
+# Sweep parameters — denser at low end where router is most sensitive
+PENALTIES    = [0.005, 0.01, 0.02, 0.05, 0.10, 0.20, 0.40]
 
 # Training hyperparameters (per penalty run)
 if args.fast:
@@ -59,9 +60,10 @@ if args.fast:
     MAX_EVAL_BATCHES = 50
     print("[FAST MODE] 1 epoch, 1000 train samples — sanity check only")
 else:
-    TRAIN_SAMPLES    = 5000    # Faster than full exp6 but more rigorous than exp5
-    EVAL_SAMPLES     = 500
-    EPOCHS           = 2
+    # Match exp6 exactly for fair Pareto comparison
+    TRAIN_SAMPLES    = 10_000
+    EVAL_SAMPLES     = 1_000
+    EPOCHS           = 3
     MAX_EVAL_BATCHES = 100
 
 BATCH_SIZE       = 2
@@ -74,8 +76,9 @@ GUMBEL_TEMP_MIN   = 0.5
 TEMP_ANNEAL_RATE  = 0.95
 
 KD_ALPHA         = 0.5
-KD_TEMPERATURE   = 3.0
+KD_TEMPERATURE   = 2.0   # was 3.0 — matching exp6 fix (T² amplification 4× not 9×)
 KD_WARMUP_STEPS  = 30
+GATE_ENTROPY_BETA = 0.1  # Escalated to match exp6
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CSV_FILENAME = f"exp8_gumbel_pareto_{TIMESTAMP}.csv"
@@ -202,7 +205,7 @@ def train_one_penalty(penalty: float, teacher_model) -> dict:
     Returns a dict with (penalty, val_loss, avg_active_layers, skip_ratio).
     """
     print(f"\n{'='*60}")
-    print(f"  Penalty: {penalty:.2f}  |  Target skip ratio: ~{penalty/0.05*0.1:.0%}")
+    print(f"  Penalty λ={penalty:.3f}  |  Higher λ → more layer skipping")
     print(f"{'='*60}")
 
     # Fresh model for each penalty (no contamination)
@@ -223,8 +226,12 @@ def train_one_penalty(penalty: float, teacher_model) -> dict:
     for p in model.router.parameters():
         p.requires_grad = True
 
+    # Fix: include router parameters in the optimizer (same fix as exp6 "Fix 6").
+    # Previously only model.parameters() (LoRA) were passed, leaving the router
+    # weights frozen despite requires_grad=True.
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY
+        itertools.chain(model.parameters(), model.router.parameters()),
+        lr=LR, weight_decay=WEIGHT_DECAY,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=EPOCHS * len(train_loader) // GRAD_ACCUM
@@ -256,14 +263,20 @@ def train_one_penalty(penalty: float, teacher_model) -> dict:
 
             gate_loss = gates.float().mean() * penalty
 
+            # Gate entropy bonus — same as exp6 fix: prevents router from collapsing
+            p_mean = gates.detach().float().mean()
+            eps = 1e-6
+            gate_entropy = -(p_mean * (p_mean + eps).log() + (1 - p_mean) * (1 - p_mean + eps).log())
+            entropy_bonus = GATE_ENTROPY_BETA * gate_entropy
+
             if global_step < KD_WARMUP_STEPS:
                 kd_loss    = torch.tensor(0.0, device="cuda")
-                total_loss = (ce_loss + gate_loss) / GRAD_ACCUM
+                total_loss = (ce_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
             else:
                 kd_loss    = compute_kd_loss(
                     student_logits[:, :-1, :], teacher_logits[:, :-1, :], KD_TEMPERATURE
                 )
-                total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss) / GRAD_ACCUM
+                total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
 
             total_loss.backward()
 
@@ -293,7 +306,8 @@ def train_one_penalty(penalty: float, teacher_model) -> dict:
             if i >= MAX_EVAL_BATCHES:
                 break
             val_batch = {k: v.to("cuda") for k, v in val_batch.items() if isinstance(v, torch.Tensor)}
-            _, v_ce, v_gates = gated_forward(model, val_batch, temperature=current_temp, hard=False)
+            # Use hard=True for binary gates so layer count is exact (matches training)
+            _, v_ce, v_gates = gated_forward(model, val_batch, temperature=current_temp, hard=True)
             total_val_loss += v_ce.item()
             layer_counts.append(v_gates.float().mean(dim=0).sum().item() + ALWAYS_KEEP)
 
@@ -321,40 +335,39 @@ def train_one_penalty(penalty: float, teacher_model) -> dict:
 # Pareto plot
 # ---------------------------------------------------------------------------
 def plot_pareto(sweep_results, baseline_val_loss, total_layers):
-    """Generate the Pareto frontier plot with manuscript-quality styling."""
+    """Generate the Pareto frontier plot with clean white-background styling."""
+    plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
     fig, ax = plt.subplots(figsize=(9, 6))
-    fig.patch.set_facecolor("#0f1117")
-    ax.set_facecolor("#0f1117")
-
+    
     # Baseline reference line
-    ax.axhline(y=baseline_val_loss, color="#44ff99", linestyle="--", linewidth=1.5,
-               label=f"Baseline LoRA (all {total_layers} layers, val_loss={baseline_val_loss:.2f})", alpha=0.7)
+    ax.axhline(y=baseline_val_loss, color="#2ecc71", linestyle="--", linewidth=1.5,
+               label=f"Baseline LoRA (all {total_layers} layers, val_loss={baseline_val_loss:.2f})", alpha=0.8)
 
     # Sweep points
     xs = [r["skip_ratio"] * 100 for r in sweep_results]
     ys = [r["val_loss"]         for r in sweep_results]
 
-    ax.plot(xs, ys, "-o", color="#6c63ff", linewidth=2.5,
-            markersize=8, markerfacecolor="#ff6584", markeredgecolor="white", markeredgewidth=1.2,
+    ax.plot(xs, ys, "-o", color="#4a90e2", linewidth=2.5,
+            markersize=8, markerfacecolor="#e74c3c", markeredgecolor="white", markeredgewidth=1.2,
             zorder=5, label="Gumbel Router (this work)")
 
     for r in sweep_results:
         ax.annotate(
-            f"λ={r['penalty']:.2f}\n{r['avg_active_layers']:.0f}L",
+            f"λ={r['penalty']:.3f}\n{r['avg_active_layers']:.1f}L",
             xy=(r["skip_ratio"] * 100, r["val_loss"]),
-            xytext=(6, -14), textcoords="offset points",
-            fontsize=7.5, color="#ccccdd",
+            xytext=(0, -18), textcoords="offset points",
+            fontsize=8.5, color="#333333", ha='center',
+            bbox=dict(boxstyle='round,pad=0.2', fc='white', alpha=0.6, ec='none')
         )
 
-    ax.set_xlabel("Layer Skip Ratio (%)", color="#ccccdd", fontsize=12)
-    ax.set_ylabel("Validation Loss (CE)",  color="#ccccdd", fontsize=12)
+    ax.set_xlabel("Layer Skip Ratio (%)", color="#333333", fontsize=12)
+    ax.set_ylabel("Validation Loss (CE)",  color="#333333", fontsize=12)
     ax.set_title("Gumbel Router Pareto Frontier\n(Wikitext-103 Validation Loss vs. Compute Savings)",
-                 color="white", fontsize=13, fontweight="bold", pad=14)
+                 color="black", fontsize=13, fontweight="bold", pad=14)
 
-    ax.tick_params(colors="#aaaaaa")
-    ax.spines[:].set_edgecolor("#444455")
-    ax.grid(True, color="#222233", linewidth=0.7, alpha=0.8)
-    ax.legend(facecolor="#1a1a2e", edgecolor="#444455", labelcolor="white", fontsize=9)
+    ax.tick_params(colors="#333333")
+    ax.grid(True, linestyle='--', alpha=0.6)
+    ax.legend(facecolor="white", edgecolor="#dddddd", labelcolor="black", fontsize=9)
 
     plt.tight_layout()
     plt.savefig(PLOT_FILE, dpi=180, bbox_inches="tight")

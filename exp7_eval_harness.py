@@ -248,8 +248,13 @@ class GatedForwardContext:
             self.handles.append(layer.register_forward_hook(hook))
 
 
-def gated_forward_eval(model, input_ids, attention_mask=None, labels=None, temperature=0.5):
-    """Deterministic gated forward (soft gates, no STE) for perplexity eval."""
+def gated_forward_eval(model, input_ids, attention_mask=None, labels=None,
+                       temperature=0.5, hard=True):
+    """
+    Gated forward for perplexity eval.
+    hard=True  → binary gates, matching training-time behaviour (fair PPL comparison).
+    hard=False → soft fractional gates (legacy; inflates perplexity vs. static baselines).
+    """
     transformer = model.base_model.model.model
     all_layers  = transformer.layers
     ctx = GatedForwardContext()
@@ -260,7 +265,7 @@ def gated_forward_eval(model, input_ids, attention_mask=None, labels=None, tempe
     ctx.remove_hooks()
 
     pooled_h = ctx.captured_h.to(next(model.router.parameters()).device)
-    gates    = model.router(pooled_h, temperature=temperature, hard=False)
+    gates    = model.router(pooled_h, temperature=temperature, hard=hard)
 
     ctx.install_gate_hooks(all_layers[ALWAYS_KEEP:], gates)
     with torch.no_grad():
@@ -312,7 +317,8 @@ def eval_perplexity(model, tokenizer, is_gumbel: bool, device="cuda"):
                     input_ids=batch["input_ids"],
                     attention_mask=batch.get("attention_mask"),
                     labels=batch.get("labels"),
-                    temperature=0.5,  # eval temperature (annealed)
+                    temperature=0.5,  # final annealed temperature
+                    hard=True,        # binary gates → fair comparison with static baselines
                 )
                 active_layer_counts.append(
                     gates.float().mean(dim=0).sum().item() + ALWAYS_KEEP
@@ -331,8 +337,10 @@ def eval_perplexity(model, tokenizer, is_gumbel: bool, device="cuda"):
     perplexity = math.exp(avg_loss)
     avg_layers = (sum(active_layer_counts) / len(active_layer_counts)
                   if active_layer_counts else None)
-    print(f"    Perplexity: {perplexity:.2f}  |  Avg active layers: "
-          f"{avg_layers:.1f}" if avg_layers else f"    Perplexity: {perplexity:.2f}")
+    if avg_layers is not None:
+        print(f"    Perplexity: {perplexity:.2f}  |  Avg active layers: {avg_layers:.1f}")
+    else:
+        print(f"    Perplexity: {perplexity:.2f}")
     return perplexity, avg_layers
 
 # ---------------------------------------------------------------------------
@@ -409,7 +417,11 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
         # For gumbel model, merge before passing to lm-eval
         # (HFLM expects a standard HuggingFace model interface)
         if is_gumbel:
-            # Detach router, merge LoRA for standard generation
+            # For MMLU/GSM8K/ARC benchmark tasks, we merge the LoRA adapter and
+            # detach the router before passing to lm-eval. This isolates the quality
+            # of the *learned weights* from the routing policy, and ensures a standard
+            # HuggingFace model interface that lm-eval expects.
+            # Perplexity (above) is measured WITH the router active (hard=True).
             eval_model = model.merge_and_unload()
         else:
             eval_model = model
@@ -486,6 +498,14 @@ def main():
     print("\n[4/4] Gumbel Router (exp6 — Gumbel-STE + KD)")
     r = evaluate_variant("gumbel_router", load_gumbel_checkpoint, GUMBEL_PATH, is_gumbel=True)
     all_results.append(r)
+
+    # ── BONUS: Per-Layer Skip Analysis ────────────────────────────────────────
+    if GUMBEL_PATH is not None and Path(GUMBEL_PATH).exists():
+        print("\n[BONUS] Computing per-layer skip rate for paper Figure 7...")
+        g_model, g_tok = load_gumbel_checkpoint(GUMBEL_PATH)
+        plot_per_layer_skip_rate(g_model, g_tok, GUMBEL_PATH)
+        del g_model, g_tok
+
     torch.cuda.empty_cache()
 
     # ── Save results ──────────────────────────────────────────────────────────
@@ -550,6 +570,73 @@ def main():
     print(f"  CSV  : {CSV_OUT}")
     print(f"  JSON : {JSON_OUT}")
 
+
+def plot_per_layer_skip_rate(model, tokenizer, checkpoint_path, n_samples=200, device="cuda"):
+    """
+    Compute and plot the average per-layer skip rate for the Gumbel router.
+    Shows which layers are most frequently skipped across a sample of inputs.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    TOTAL_LAYERS = len(model.base_model.model.model.layers)
+    ROUTABLE     = TOTAL_LAYERS - ALWAYS_KEEP
+
+    raw  = load_dataset("wikitext", "wikitext-103-raw-v1", split="validation")
+    raw  = raw.filter(lambda x: len(x["text"]) > 100).select(range(min(n_samples, len(raw))))
+
+    def tok(batch):
+        out = tokenizer(batch["text"], truncation=True, padding="max_length", max_length=512)
+        out["labels"] = out["input_ids"].copy()
+        return out
+
+    ds = raw.map(tok, batched=True, remove_columns=raw.column_names)
+    ds.set_format("torch")
+    loader = DataLoader(ds, batch_size=4, shuffle=False)
+
+    per_layer_skip = torch.zeros(ROUTABLE)
+    total_batches  = 0
+    model.eval()
+    with torch.no_grad():
+        for batch in loader:
+            batch = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
+            _, gates = gated_forward_eval(
+                model,
+                input_ids=batch["input_ids"],
+                attention_mask=batch.get("attention_mask"),
+                labels=batch.get("labels"),
+                temperature=0.5, hard=True,
+            )
+            # gates: [B, ROUTABLE]. 1=active, 0=skipped
+            per_layer_skip += (1.0 - gates.float()).mean(dim=0).cpu()
+            total_batches  += 1
+
+    per_layer_skip /= max(total_batches, 1)  # average skip rate per layer, [ROUTABLE]
+
+    layer_indices = list(range(ALWAYS_KEEP + 1, TOTAL_LAYERS + 1))
+    skip_pct      = (per_layer_skip * 100).tolist()
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    colors = ["#e74c3c" if s > 50 else "#3498db" for s in skip_pct]
+    bars   = ax.bar(layer_indices, skip_pct, color=colors, edgecolor="white", linewidth=0.5)
+    ax.axhline(y=50, color="#888888", linestyle="--", linewidth=1, alpha=0.6, label="50% threshold")
+    ax.set_xlabel("Transformer Layer Index", fontsize=13)
+    ax.set_ylabel("Skip Rate (%)", fontsize=13)
+    ax.set_title("Per-Layer Skip Rate — Gumbel Router\n(Red = majority of inputs skip this layer)",
+                 fontsize=14, fontweight="bold", pad=12)
+    ax.set_ylim(0, 105)
+    ax.set_xticks(layer_indices)
+    ax.legend(fontsize=10)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.5)
+    for bar, pct in zip(bars, skip_pct):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1.5,
+                f"{pct:.0f}%", ha="center", va="bottom", fontsize=8)
+    plt.tight_layout()
+    out_path = RESEARCH_DIR / "exp7_per_layer_skip_rate.png"
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  Per-layer skip rate → {out_path}")
 
 if __name__ == "__main__":
     main()

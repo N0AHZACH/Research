@@ -33,7 +33,7 @@ def main():
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
     labels = ['Baseline\n(Full Layers)', 'Stochastic\n(50% Drop)', 'Dynamic\n(REINFORCE)']
 
-    plt.style.use('seaborn-v0_8-darkgrid' if 'seaborn-v0_8-darkgrid' in plt.style.available else 'default')
+    plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
 
     # Shared variables used by both Phase 1 plots and the all-experiments comparison below
     val1 = val2 = val3 = None
@@ -152,12 +152,25 @@ def main():
         plt.tight_layout()
         plt.savefig('inference_speedup_bar.png', dpi=300, bbox_inches='tight')
 
-    # Pareto Sweep Data
+    # Prefer exp8 (Gumbel Pareto sweep) over exp5 (old REINFORCE sweep)
+    exp8_files = glob.glob("exp8_gumbel_pareto_*.csv")
+    exp8_files = [f for f in exp8_files if os.path.getsize(f) > 100]
     pareto_files = glob.glob("pareto_sweep_metrics_*.csv")
-    if pareto_files:
+    if exp8_files:
+        pareto_file = sorted(exp8_files, key=os.path.getmtime, reverse=True)[0]
+        df_par = pd.read_csv(pareto_file)
+        # Normalize column name: exp8 uses 'Penalty', exp5 used 'Compute Penalty'
+        if 'Penalty' in df_par.columns and 'Compute Penalty' not in df_par.columns:
+            df_par.rename(columns={'Penalty': 'Compute Penalty'}, inplace=True)
+        print(f"  Using exp8 Gumbel Pareto data: {pareto_file}")
+    elif pareto_files:
         pareto_file = sorted(pareto_files, key=os.path.getmtime, reverse=True)[0]
         df_par = pd.read_csv(pareto_file)
-        
+        print(f"  Using exp5 REINFORCE Pareto data: {pareto_file}")
+    else:
+        df_par = None
+
+    if df_par is not None:
         # 6. Pareto Frontier Scatter Plot (Accuracy vs Compute)
         plt.figure(figsize=(10, 6))
         # Plot Dynamic Router curve
@@ -167,13 +180,15 @@ def main():
                          (row['Avg Active Layers'], row['Validation Loss']),
                          textcoords="offset points", xytext=(0,10), ha='center', fontsize=10, color='#2ca02c')
         
-        # Plot Baseline Point
-        plt.scatter(22, final_val1, color='#1f77b4', s=150, zorder=5, label='Baseline (22 Layers)')
-        plt.annotate("Baseline", (22, final_val1), textcoords="offset points", xytext=(0,10), ha='center', fontsize=11, fontweight='bold', color='#1f77b4')
-        
-        # Plot Stochastic Point
-        plt.scatter(13, final_val2, color='#ff7f0e', s=150, zorder=5, label='Stochastic (13 Layers)')
-        plt.annotate("Stochastic", (13, final_val2), textcoords="offset points", xytext=(0,10), ha='center', fontsize=11, fontweight='bold', color='#ff7f0e')
+        # Plot Baseline Point (only if exp1 CSV was available)
+        if final_val1 is not None:
+            plt.scatter(22, final_val1, color='#1f77b4', s=150, zorder=5, label='Baseline (22 Layers)')
+            plt.annotate("Baseline", (22, final_val1), textcoords="offset points", xytext=(0,10), ha='center', fontsize=11, fontweight='bold', color='#1f77b4')
+
+        # Plot Stochastic Point (only if exp2 CSV was available)
+        if final_val2 is not None:
+            plt.scatter(13, final_val2, color='#ff7f0e', s=150, zorder=5, label='Stochastic (13 Layers)')
+            plt.annotate("Stochastic", (13, final_val2), textcoords="offset points", xytext=(0,10), ha='center', fontsize=11, fontweight='bold', color='#ff7f0e')
 
         plt.title('Ultimate Pareto Frontier: Accuracy vs. Compute Efficiency', fontsize=16, fontweight='bold', pad=15)
         plt.xlabel('Average Active Layers (Compute Cost)', fontsize=14)
