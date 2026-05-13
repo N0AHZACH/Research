@@ -76,8 +76,8 @@ def get_optimal_config():
 
     if vram_gb >= 15:
         # RTX 4000 20GB or similar server-grade
-        bs = 16
-        ga = 1  # No accumulation needed at bs=16 for TinyLlama
+        bs = 8   # Lowered from 16 to prevent OOM
+        ga = 2   # Effective BS stays at 16
         nw = min(cpu_count // 2, 8)  # Utilize the i9-13900KF
         attn = "sdpa"
         print(f"[SERVER MODE] Detected {vram_gb:.1f}GB VRAM. Scaling: BS={bs}, GA={ga}, Workers={nw}, SDPA=ON")
