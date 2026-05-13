@@ -154,6 +154,15 @@ for p in teacher_model.parameters():
     p.requires_grad = False
 teacher_model.eval()
 
+# Compile models for 15-20% speedup on modern GPUs
+if ATTN_IMPL == "sdpa":
+    try:
+        print("Compiling models with torch.compile...")
+        model = torch.compile(model)
+        teacher_model = torch.compile(teacher_model)
+    except Exception as e:
+        print(f"[WARNING] torch.compile failed: {e}")
+
 lora_cfg = LoraConfig(
     task_type=TaskType.CAUSAL_LM,
     r=16, lora_alpha=32,

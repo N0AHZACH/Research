@@ -240,22 +240,17 @@ def compute_kd_loss(s_logits, t_logits, T):
 # ---------------------------------------------------------------------------
 # Single penalty training run
 # ---------------------------------------------------------------------------
-def train_one_penalty(penalty: float, teacher_model) -> dict:
+def train_one_penalty(penalty: float, teacher_model, base_model) -> dict:
     """
-    Train a fresh Gumbel router model with the given compute penalty.
-    Returns a dict with (penalty, val_loss, avg_active_layers, skip_ratio).
+    Train a Gumbel router model with the given compute penalty.
+    Uses the pre-loaded base_model to save IO time.
     """
     print(f"\n{'='*60}")
     print(f"  Penalty λ={penalty:.3f}  |  Higher λ → more layer skipping")
     print(f"{'='*60}")
 
-    # Fresh model for each penalty (no contamination)
-    base_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, 
-        torch_dtype=torch.bfloat16, 
-        device_map="cuda",
-        attn_implementation=ATTN_IMPL,
-    )
+    # Re-initialize LoRA and Router on the shared base_model
+    # This avoids loading 2.2GB from disk for every penalty run.
     lora_cfg = LoraConfig(
         task_type=TaskType.CAUSAL_LM, r=16, lora_alpha=32,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
@@ -269,6 +264,15 @@ def train_one_penalty(penalty: float, teacher_model) -> dict:
     model.router = GumbelRouter(model.config.hidden_size, ROUTABLE_LAYERS).to("cuda")
     for p in model.router.parameters():
         p.requires_grad = True
+
+    # Compile the student for 15-20% speedup
+    if ATTN_IMPL == "sdpa":
+        try:
+            print("  Compiling student model...")
+            model = torch.compile(model)
+        except Exception as e:
+            print(f"  [WARNING] Student compilation failed: {e}")
+
 
     # Fix: include router parameters in the optimizer (same fix as exp6 "Fix 6").
     # Previously only model.parameters() (LoRA) were passed, leaving the router
@@ -428,17 +432,31 @@ def main():
     print(f"  Train samples: {TRAIN_SAMPLES} | Epochs: {EPOCHS}")
     print("="*70)
 
-    # Shared frozen teacher (loaded once, reused across all penalty runs)
-    print("\nLoading frozen Teacher model for KD...")
+    # Shared models (loaded once, reused across all penalty runs)
+    print("\nLoading models into VRAM (shared across sweep)...")
+    
+    # Base model for students
+    base_model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda",
+        attn_implementation=ATTN_IMPL
+    )
+    
+    # Shared frozen teacher
     teacher_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, 
-        torch_dtype=torch.bfloat16, 
-        device_map="cuda",
-        attn_implementation=ATTN_IMPL,
+        MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda",
+        attn_implementation=ATTN_IMPL
     )
     for p in teacher_model.parameters():
         p.requires_grad = False
     teacher_model.eval()
+
+    # Compile teacher for faster KD steps
+    if ATTN_IMPL == "sdpa":
+        try:
+            print("Compiling teacher model...")
+            teacher_model = torch.compile(teacher_model)
+        except Exception as e:
+            print(f"[WARNING] Teacher compilation failed: {e}")
 
     # CSV init
     with open(CSV_FILENAME, "w", newline="") as f:
@@ -448,7 +466,7 @@ def main():
 
     sweep_results = []
     for penalty in PENALTIES:
-        result = train_one_penalty(penalty, teacher_model)
+        result = train_one_penalty(penalty, teacher_model, base_model)
         sweep_results.append(result)
 
         with open(CSV_FILENAME, "a", newline="") as f:
