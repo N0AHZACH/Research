@@ -100,8 +100,8 @@ def get_optimal_config():
         bs = 16
         ga = 1  # No accumulation needed at bs=16 for TinyLlama
         nw = min(cpu_count // 2, 8)  # Utilize the i9-13900KF
-        attn = "flash_attention_2"
-        print(f"[SERVER MODE] Detected {vram_gb:.1f}GB VRAM. Scaling: BS={bs}, GA={ga}, Workers={nw}, FlashAttention=ON")
+        attn = "sdpa"
+        print(f"[SERVER MODE] Detected {vram_gb:.1f}GB VRAM. Scaling: BS={bs}, GA={ga}, Workers={nw}, SDPA=ON")
     else:
         # RTX 4060 8GB or similar
         bs = 2
