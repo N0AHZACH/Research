@@ -109,23 +109,38 @@ class GumbelRouter(nn.Module):
         logits_2c = torch.stack([torch.zeros_like(logits), logits], dim=-1)
         return F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)[..., 1].to(pooled_h.dtype)
 
+class StopForwardException(Exception): pass
+
 class GatedForwardContext:
-    def __init__(self): self.gates = None
+    def __init__(self):
+        self.gates, self.handles, self.captured_h = None, [], None
+    def remove_hooks(self):
+        for h in self.handles: h.remove()
+        self.handles.clear()
+    def install_early_stop_hook(self, layer):
+        def hook(module, input, output):
+            hidden_state = output[0] if isinstance(output, tuple) else output
+            self.captured_h = hidden_state.detach().float().mean(dim=1)
+            raise StopForwardException()
+        self.handles.append(layer.register_forward_hook(hook))
 
 def gated_forward(model, batch, temperature, hard=True):
-    ctx = GatedForwardContext()
     input_ids = batch["input_ids"]
     attention_mask = batch["attention_mask"]
     labels = batch["labels"]
+    ctx = GatedForwardContext()
+    base = model.base_model.model.model
     
-    with torch.no_grad():
-        base = model.base_model.model.model
-        h = base.embed_tokens(input_ids)
-        position_ids = torch.arange(0, input_ids.shape[1], device=input_ids.device).unsqueeze(0)
-        position_embeddings = base.rotary_emb(h, position_ids)
-        for i in range(ALWAYS_KEEP):
-            h = base.layers[i](h, attention_mask=attention_mask, position_embeddings=position_embeddings)[0]
-        ctx.gates = model.router(h.mean(dim=1), temperature, hard)
+    ctx.install_early_stop_hook(base.layers[ALWAYS_KEEP - 1])
+    try:
+        with torch.no_grad():
+            _ = model(input_ids=input_ids, attention_mask=attention_mask)
+    except StopForwardException:
+        pass
+    finally:
+        ctx.remove_hooks()
+        
+    ctx.gates = model.router(ctx.captured_h.to("cuda"), temperature, hard)
 
     handles = []
     def hook_fn(module, input, output, layer_idx):
@@ -149,17 +164,17 @@ def compute_kd_loss(s_logits, t_logits, T):
     return F.kl_div(F.log_softmax(s_logits/T, dim=-1), F.softmax(t_logits/T, dim=-1), reduction="batchmean") * (T**2)
 
 def train_one_penalty(penalty: float, teacher_model, base_model) -> dict:
-    print(f"\n--- λ={penalty:.3f} ---")
+    print(f"\n--- lambda={penalty:.3f} ---")
     lora_cfg = LoraConfig(task_type=TaskType.CAUSAL_LM, r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.05, bias="none")
     model = get_peft_model(base_model, lora_cfg)
     ROUTABLE_LAYERS = len(model.base_model.model.model.layers) - ALWAYS_KEEP
     model.router = GumbelRouter(model.config.hidden_size, ROUTABLE_LAYERS).to("cuda")
     
-    if ATTN_IMPL == "sdpa":
+    if ATTN_IMPL == "sdpa" and os.name != "nt":
         try: model = torch.compile(model)
         except: pass
 
-    optimizer = torch.optim.AdamW(itertools.chain(model.parameters(), model.router.parameters()), lr=LR, weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=LR, weight_decay=WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS * len(train_loader) // GRAD_ACCUM)
     
     current_temp, global_step = GUMBEL_TEMP_START, 0
@@ -223,7 +238,7 @@ def main():
             attn_implementation=ATTN_IMPL
         )
     teacher_model.eval()
-    if ATTN_IMPL == "sdpa":
+    if ATTN_IMPL == "sdpa" and os.name != "nt":
         try: teacher_model = torch.compile(teacher_model)
         except: pass
 

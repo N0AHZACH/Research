@@ -97,20 +97,20 @@ def get_optimal_config():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    if vram_gb >= 15:
-        # Standard Server Mode (Safe for 3-epoch runs)
-        bs = 8   # Matches exp6 for consistency
-        ga = 2   # Effective BS = 16
-        nw = min(cpu_count // 2, 12)
+    if vram_gb >= 7:
+        # Optimized Laptop/Desktop Mode (RTX 4060/3060+)
+        bs = 4   # Reduced physical batch size to prevent VRAM spilling
+        ga = 4   # Effective BS = 16
+        nw = 0   # Disable workers to prevent any Windows multiprocessing overhead
         attn = "sdpa"
-        print(f"[SERVER MODE] Standard 3-Epoch Mode: BS={bs}, GA={ga}, Workers={nw}, SDPA=ON, Compile=ON")
+        print(f"[LAPTOP OPTIMIZED] Hardware: {vram_gb:.1f}GB VRAM | BS: {bs} | Workers: {nw} | SDPA: ON")
     else:
-        # RTX 4060 8GB or similar
+        # Fallback for very low VRAM
         bs = 2
         ga = 8
-        nw = 0  # Windows workers can be flaky on laptops
+        nw = 0
         attn = None
-        print(f"[DESKTOP MODE] Detected {vram_gb:.1f}GB VRAM. Using safe defaults: BS={bs}, GA={ga}")
+        print(f"[SAFE MODE] Low VRAM ({vram_gb:.1f}GB). Using safe defaults.")
     
     return bs, ga, nw, attn
 
@@ -143,6 +143,18 @@ train_ds = raw.map(tokenize, batched=True, remove_columns=raw.column_names)
 eval_ds  = eval_raw.map(tokenize, batched=True, remove_columns=eval_raw.column_names)
 train_ds.set_format("torch")
 eval_ds.set_format("torch")
+# Convert to pure PyTorch memory dataset to bypass Windows Arrow mapping crashes
+# This safely enables num_workers > 0 on Windows!
+class RAMDataset(torch.utils.data.Dataset):
+    def __init__(self, hf_ds):
+        self.data = [{"input_ids": hf_ds[i]["input_ids"], 
+                      "attention_mask": hf_ds[i]["attention_mask"], 
+                      "labels": hf_ds[i]["labels"]} for i in range(len(hf_ds))]
+    def __len__(self): return len(self.data)
+    def __getitem__(self, i): return self.data[i]
+
+train_ds = RAMDataset(train_ds)
+eval_ds  = RAMDataset(eval_ds)
 
 train_loader = DataLoader(
     train_ds, batch_size=BATCH_SIZE, shuffle=True, 
@@ -178,6 +190,8 @@ class GumbelRouter(nn.Module):
 # ---------------------------------------------------------------------------
 # Hook-based gated forward (identical to exp6)
 # ---------------------------------------------------------------------------
+class StopForwardException(Exception): pass
+
 class GatedForwardContext:
     def __init__(self):
         self.gates      = None
@@ -189,10 +203,11 @@ class GatedForwardContext:
             h.remove()
         self.handles.clear()
 
-    def install_capture_hook(self, layer):
+    def install_early_stop_hook(self, layer):
         def hook(module, input, output):
             hidden_state = output[0] if isinstance(output, tuple) else output
             self.captured_h = hidden_state.detach().float().mean(dim=1)
+            raise StopForwardException()
         self.handles.append(layer.register_forward_hook(hook))
 
     def install_gate_hooks(self, layers, gates):
@@ -217,10 +232,14 @@ def gated_forward(model, batch, temperature, hard=True):
     all_layers     = transformer.layers
     ctx = GatedForwardContext()
 
-    ctx.install_capture_hook(all_layers[ALWAYS_KEEP - 1])
-    with torch.no_grad():
-        _ = model(input_ids=input_ids, attention_mask=attention_mask)
-    ctx.remove_hooks()
+    ctx.install_early_stop_hook(all_layers[ALWAYS_KEEP - 1])
+    try:
+        with torch.no_grad():
+            _ = model(input_ids=input_ids, attention_mask=attention_mask)
+    except StopForwardException:
+        pass
+    finally:
+        ctx.remove_hooks()
 
     pooled_h = ctx.captured_h.to("cuda")
     gates    = model.router(pooled_h, temperature=temperature, hard=hard)
@@ -248,7 +267,7 @@ def train_one_penalty(penalty: float, teacher_model, base_model) -> dict:
     Uses the pre-loaded base_model to save IO time.
     """
     print(f"\n{'='*60}")
-    print(f"  Penalty λ={penalty:.3f}  |  Higher λ → more layer skipping")
+    print(f"  Penalty lambda={penalty:.3f}  |  Higher lambda -> more layer skipping")
     print(f"{'='*60}")
 
     # Re-initialize LoRA and Router on the shared base_model
@@ -258,6 +277,8 @@ def train_one_penalty(penalty: float, teacher_model, base_model) -> dict:
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         lora_dropout=0.05, bias="none",
     )
+    # Removed gradient_checkpointing_enable() because it conflicts with PyTorch register_forward_hook
+    # We will rely on 4-bit quantization and BS=4 to prevent VRAM spilling instead.
     model = get_peft_model(base_model, lora_cfg)
 
     TOTAL_LAYERS    = len(model.base_model.model.model.layers)
@@ -268,19 +289,20 @@ def train_one_penalty(penalty: float, teacher_model, base_model) -> dict:
         p.requires_grad = True
 
     # Compile the student for 15-20% speedup
-    if ATTN_IMPL == "sdpa":
+    if ATTN_IMPL == "sdpa" and os.name != "nt":
         try:
             print("  Compiling student model...")
             model = torch.compile(model)
         except Exception as e:
             print(f"  [WARNING] Student compilation failed: {e}")
+    elif os.name == "nt":
+        print("  [INFO] Skipping student compilation (Windows/Triton limitation).")
 
 
     # Fix: include router parameters in the optimizer (same fix as exp6 "Fix 6").
-    # Previously only model.parameters() (LoRA) were passed, leaving the router
-    # weights frozen despite requires_grad=True.
+    # Use filter to avoid passing the router parameters twice (which causes UserWarning)
     optimizer = torch.optim.AdamW(
-        itertools.chain(model.parameters(), model.router.parameters()),
+        filter(lambda p: p.requires_grad, model.parameters()),
         lr=LR, weight_decay=WEIGHT_DECAY,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -403,7 +425,7 @@ def plot_pareto(sweep_results, baseline_val_loss, total_layers):
 
     for r in sweep_results:
         ax.annotate(
-            f"λ={r['penalty']:.3f}\n{r['avg_active_layers']:.1f}L",
+            f"lambda={r['penalty']:.3f}\n{r['avg_active_layers']:.1f}L",
             xy=(r["skip_ratio"] * 100, r["val_loss"]),
             xytext=(0, -18), textcoords="offset points",
             fontsize=8.5, color="#333333", ha='center',
@@ -437,17 +459,22 @@ def main():
     # Shared models (loaded once, reused across all penalty runs)
     print("\nLoading models into VRAM (shared across sweep)...")
     
-    # Base model for students
+    # Base model for students (Load in 4-bit to allow 2x batch size)
+    from transformers import BitsAndBytesConfig
+    quant_config_student = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
     base_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda",
+        MODEL_ID, quantization_config=quant_config_student, device_map="cuda",
         attn_implementation=ATTN_IMPL
     )
     
     # Shared frozen teacher
-    print("\nLoading frozen Teacher model for KD...")
+    print("\nLoading frozen Teacher model for KD (4-bit)...")
+    from transformers import BitsAndBytesConfig
+    quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
+    
     teacher_model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID, 
-        torch_dtype=torch.bfloat16, 
+        quantization_config=quant_config,
         device_map="cuda",
         attn_implementation=ATTN_IMPL,
     )
@@ -456,12 +483,14 @@ def main():
     teacher_model.eval()
 
     # Compile teacher for faster KD steps
-    if ATTN_IMPL == "sdpa":
+    if ATTN_IMPL == "sdpa" and os.name != "nt":
         try:
             print("Compiling teacher model...")
             teacher_model = torch.compile(teacher_model)
         except Exception as e:
             print(f"[WARNING] Teacher compilation failed: {e}")
+    elif os.name == "nt":
+        print("[INFO] Skipping teacher compilation (Windows/Triton limitation).")
 
     # CSV init
     with open(CSV_FILENAME, "w", newline="") as f:
@@ -507,8 +536,8 @@ def main():
     for r in sweep_results:
         print(f"  {r['penalty']:>8.2f} {r['val_loss']:>10.4f} {r['avg_active_layers']:>12.1f} {r['skip_ratio']*100:>7.1f}%")
 
-    print(f"\n  CSV  → {CSV_FILENAME}")
-    print(f"  Plot → {PLOT_FILE}")
+    print(f"\n  CSV  -> {CSV_FILENAME}")
+    print(f"  Plot -> {PLOT_FILE}")
     print("\nPhase 4 Pareto sweep complete!")
 
 

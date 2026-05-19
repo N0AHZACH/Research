@@ -6,3 +6,7 @@ __pycache__/
 
 # Ignore Hugging Face cache
 .cache/
+
+# Ignore PyTorch checkpoints
+*.pt
+
