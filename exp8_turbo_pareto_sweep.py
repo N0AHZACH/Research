@@ -314,6 +314,10 @@ def main():
             
             cur_temp = max(GUMBEL_TEMP_MIN, cur_temp * TEMP_ANNEAL_RATE)
             
+            # this is the pause point so that you can ctrl+C in the terminal whatever epoch you
+            # were doing gets saved into a .pt file so that when you restart the training it starts
+            # from the previous epoch this ensures you do not be like me...... Re-running the same script
+            # again and again and again and again. You're welcome!. This is a sanity feature. You skip this if you want.
             # Save Checkpoint at end of epoch
             if epoch + 1 == EPOCHS:
                 next_chunk_idx = chunk_idx + 1
