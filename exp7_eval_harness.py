@@ -121,8 +121,8 @@ import torch.nn as nn
 
 class GumbelRouter(nn.Module):
     """
-    Matches the architecture in exp6_gumbel_router.py exactly.
-    Required to load the saved router_weights.pt alongside the LoRA adapter.
+    Universal router architecture matching both exp6 and exp9.
+    Accepts 2D [B, H] (sequence-level) or 3D [B, S, H] (token-level) hidden states.
     """
     def __init__(self, hidden_size: int, num_layers: int):
         super().__init__()
@@ -134,12 +134,12 @@ class GumbelRouter(nn.Module):
             nn.Linear(hidden_size // 4, num_layers),
         )
 
-    def forward(self, pooled_h: torch.Tensor, temperature: float = 0.5, hard: bool = False):
-        pooled_h  = pooled_h.float()
-        logits    = self.net(pooled_h)
+    def forward(self, h: torch.Tensor, temperature: float = 0.5, hard: bool = False):
+        h         = h.float()
+        logits    = self.net(h)
         logits_2c = torch.stack([torch.zeros_like(logits), logits], dim=-1)
         soft      = F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)
-        return soft[..., 1].to(pooled_h.dtype)
+        return soft[..., 1].to(h.dtype)
 
 # ---------------------------------------------------------------------------
 # Model loader helpers
@@ -216,6 +216,8 @@ def load_gumbel_checkpoint(checkpoint_path: Path, device="cuda"):
 # ---------------------------------------------------------------------------
 # Gated inference helpers (mirrors exp6 logic)
 # ---------------------------------------------------------------------------
+class StopForwardException(Exception): pass
+
 class GatedForwardContext:
     """Minimal hook context for deterministic inference (no STE needed)."""
     def __init__(self):
@@ -228,41 +230,50 @@ class GatedForwardContext:
             h.remove()
         self.handles.clear()
 
-    def install_capture_hook(self, layer):
-        def hook(module, input, output):
-            hidden_state = output[0] if isinstance(output, tuple) else output
-            self.captured_h = hidden_state.detach().float().mean(dim=1)
-        self.handles.append(layer.register_forward_hook(hook))
-
     def install_gate_hooks(self, layers, gates):
         self.gates = gates
+        is_token_level = (gates.dim() == 3)
         for i, layer in enumerate(layers):
             idx = i
             def hook(module, input, output, layer_i=idx):
                 residual = input[0]
                 is_tuple = isinstance(output, tuple)
                 h    = output[0] if is_tuple else output
-                gate = self.gates[:, layer_i].view(-1, 1, 1).to(h.dtype)
+                if is_token_level:
+                    gate = self.gates[:, :, layer_i].unsqueeze(-1).to(h.dtype)
+                else:
+                    gate = self.gates[:, layer_i].view(-1, 1, 1).to(h.dtype)
                 gated_h = gate * h + (1.0 - gate) * residual
                 return (gated_h,) + output[1:] if is_tuple else gated_h
             self.handles.append(layer.register_forward_hook(hook))
 
 
 def gated_forward_eval(model, input_ids, attention_mask=None, labels=None,
-                       temperature=0.5, hard=True):
+                       temperature=0.5, hard=True, is_token_level=False):
     """
-    Gated forward for perplexity eval.
+    Gated forward for perplexity eval with early stopping.
     hard=True  → binary gates, matching training-time behaviour (fair PPL comparison).
-    hard=False → soft fractional gates (legacy; inflates perplexity vs. static baselines).
     """
     transformer = model.base_model.model.model
     all_layers  = transformer.layers
     ctx = GatedForwardContext()
 
-    ctx.install_capture_hook(all_layers[ALWAYS_KEEP - 1])
-    with torch.no_grad():
-        _ = model(input_ids=input_ids, attention_mask=attention_mask)
-    ctx.remove_hooks()
+    def early_stop_hook(module, input, output):
+        hidden_state = output[0] if isinstance(output, tuple) else output
+        if is_token_level:
+            ctx.captured_h = hidden_state.detach().float()
+        else:
+            ctx.captured_h = hidden_state.detach().float().mean(dim=1)
+        raise StopForwardException()
+
+    handle = all_layers[ALWAYS_KEEP - 1].register_forward_hook(early_stop_hook)
+    try:
+        with torch.no_grad():
+            _ = model(input_ids=input_ids, attention_mask=attention_mask)
+    except StopForwardException:
+        pass
+    finally:
+        handle.remove()
 
     pooled_h = ctx.captured_h.to(next(model.router.parameters()).device)
     gates    = model.router(pooled_h, temperature=temperature, hard=hard)
@@ -283,7 +294,7 @@ from torch.utils.data import DataLoader
 PERPLEXITY_SAMPLES = 500  # fast but representative
 MAX_LENGTH         = 512
 
-def eval_perplexity(model, tokenizer, is_gumbel: bool, device="cuda"):
+def eval_perplexity(model, tokenizer, is_gumbel: bool, is_token_level: bool = False, device="cuda"):
     """
     Compute validation perplexity on Wikitext-103.
     Uses gated_forward_eval() for the Gumbel variant, standard forward otherwise.
@@ -319,9 +330,10 @@ def eval_perplexity(model, tokenizer, is_gumbel: bool, device="cuda"):
                     labels=batch.get("labels"),
                     temperature=0.5,  # final annealed temperature
                     hard=True,        # binary gates → fair comparison with static baselines
+                    is_token_level=is_token_level,
                 )
                 active_layer_counts.append(
-                    gates.float().mean(dim=0).sum().item() + ALWAYS_KEEP
+                    gates.float().mean(dim=list(range(gates.dim() - 1))).sum().item() + ALWAYS_KEEP
                 )
             else:
                 outputs = model(
@@ -398,8 +410,9 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
         use_base_fallback = True
         model, tokenizer = load_base_model()
 
+    is_token_level = "token" in str(checkpoint).lower() if checkpoint else False
     # Perplexity (always run)
-    ppl, avg_layers = eval_perplexity(model, tokenizer, is_gumbel=is_gumbel)
+    ppl, avg_layers = eval_perplexity(model, tokenizer, is_gumbel=is_gumbel, is_token_level=is_token_level)
 
     result = {
         "variant": name,
@@ -595,6 +608,7 @@ def plot_per_layer_skip_rate(model, tokenizer, checkpoint_path, n_samples=200, d
     ds.set_format("torch")
     loader = DataLoader(ds, batch_size=4, shuffle=False)
 
+    is_token_level = "token" in str(checkpoint_path).lower()
     per_layer_skip = torch.zeros(ROUTABLE)
     total_batches  = 0
     model.eval()
@@ -607,9 +621,11 @@ def plot_per_layer_skip_rate(model, tokenizer, checkpoint_path, n_samples=200, d
                 attention_mask=batch.get("attention_mask"),
                 labels=batch.get("labels"),
                 temperature=0.5, hard=True,
+                is_token_level=is_token_level,
             )
-            # gates: [B, ROUTABLE]. 1=active, 0=skipped
-            per_layer_skip += (1.0 - gates.float()).mean(dim=0).cpu()
+            # gates: [B, L] or [B, S, L]. Average over all dims except last → per-layer skip rate
+            skip = 1.0 - gates.float()
+            per_layer_skip += skip.mean(dim=list(range(skip.dim() - 1))).cpu()
             total_batches  += 1
 
     per_layer_skip /= max(total_batches, 1)  # average skip rate per layer, [ROUTABLE]

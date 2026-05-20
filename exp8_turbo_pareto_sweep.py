@@ -33,7 +33,7 @@ from tqdm import tqdm
 MODEL_ID     = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 MAX_LENGTH   = 512
 ALWAYS_KEEP  = 4
-PENALTIES    = [0.005, 0.01, 0.02, 0.05, 0.10, 0.20, 0.40]
+PENALTIES    = [0.1, 0.2, 0.4, 0.8, 1.2, 1.5, 2.0]
 
 # Standard Research Mode
 TRAIN_SAMPLES    = 10_000
@@ -173,8 +173,8 @@ def main():
         o["labels"] = o["input_ids"].copy()
         return o
 
-    train_enc = raw.map(tokenize_fn, batched=True, remove_columns=raw.column_names)
-    eval_enc  = eval_raw.map(tokenize_fn, batched=True, remove_columns=eval_raw.column_names)
+    train_enc = raw.map(tokenize_fn, batched=True, remove_columns=raw.column_names, num_proc=12)
+    eval_enc  = eval_raw.map(tokenize_fn, batched=True, remove_columns=eval_raw.column_names, num_proc=12)
     
     train_enc.set_format("torch")
     eval_enc.set_format("torch")

@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from datasets import load_dataset
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, TaskType
 from tqdm import tqdm
 
@@ -87,8 +87,8 @@ print(f"  Train: {len(train_ds)} | Eval: {len(eval_ds)}")
 # Models: Student (LoRA) + Teacher (Frozen) for KD
 # ==============================================================================
 print("\nLoading TinyLlama student (LoRA) ...")
-base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda")
-
+q_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
+base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=q_cfg, device_map="cuda")
 lora_cfg = LoraConfig(
     task_type=TaskType.CAUSAL_LM,
     r=16, lora_alpha=32,
@@ -224,6 +224,8 @@ class GatedForwardContext:
             self.handles.append(h)
 
 
+class StopForwardException(Exception): pass
+
 def gated_forward(model, batch, temperature, hard=True):
     """
     Two-pass strategy using hooks:
@@ -240,13 +242,19 @@ def gated_forward(model, batch, temperature, hard=True):
     ctx = GatedForwardContext()
 
     # --- Pass 1: Capture contextual hidden state after ALWAYS_KEEP layers ---
-    # Install a capture hook on the last always-kept layer
-    ctx.install_capture_hook(all_layers[ALWAYS_KEEP - 1])
+    def early_stop_hook(module, input, output):
+        hidden_state = output[0] if isinstance(output, tuple) else output
+        ctx.captured_h = hidden_state.detach().float().mean(dim=1)
+        raise StopForwardException()
 
-    with torch.no_grad():
-        _ = model(input_ids=input_ids, attention_mask=attention_mask)
-
-    ctx.remove_hooks()
+    handle = all_layers[ALWAYS_KEEP - 1].register_forward_hook(early_stop_hook)
+    try:
+        with torch.no_grad():
+            _ = model(input_ids=input_ids, attention_mask=attention_mask)
+    except StopForwardException:
+        pass
+    finally:
+        handle.remove()
 
     # --- Compute per-sample gates from captured h ---  # Fix 1, 2, 3
     # captured_h is already float32 (detached + cast in the capture hook).
