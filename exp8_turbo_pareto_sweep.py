@@ -33,7 +33,7 @@ from tqdm import tqdm
 MODEL_ID     = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 MAX_LENGTH   = 512
 ALWAYS_KEEP  = 4
-PENALTIES    = [0.1, 0.2, 0.4, 0.8, 1.2, 1.5, 2.0]
+PENALTIES    = [0.1, 0.2, 0.8, 1.2, 2.0, 3.0]
 
 # Standard Research Mode
 TRAIN_SAMPLES    = 10_000
@@ -49,7 +49,7 @@ TEMP_ANNEAL_RATE  = 0.95
 KD_ALPHA         = 0.5
 KD_TEMPERATURE   = 2.0
 KD_WARMUP_STEPS  = 30
-GATE_ENTROPY_BETA = 0.1
+GATE_ENTROPY_BETA = 0.0  # Disabled: was counteracting the compute penalty and causing 10% saturation
 
 # ---------------------------------------------------------------------------
 # Hardware Optimization
@@ -93,18 +93,23 @@ class RAMDataset(Dataset):
 # ---------------------------------------------------------------------------
 # Helper Logic
 # ---------------------------------------------------------------------------
-class GumbelRouter(nn.Module):
+class TokenLevelGumbelRouter(nn.Module):
     def __init__(self, hidden_size: int, num_layers: int):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
             nn.GELU(),
-            nn.Linear(hidden_size // 2, num_layers)
+            nn.Linear(hidden_size // 2, hidden_size // 4),
+            nn.GELU(),
+            nn.Linear(hidden_size // 4, num_layers)
         )
-    def forward(self, pooled_h: torch.Tensor, temperature: float, hard: bool = True):
-        logits = self.net(pooled_h.float())
+        # Initialize output layer with strong negative bias so gates start near 0.
+        # This prevents the router from collapsing into the 10% skip local minimum.
+        nn.init.constant_(self.net[-1].bias, -2.0)
+    def forward(self, h_seq: torch.Tensor, temperature: float, hard: bool = True):
+        logits = self.net(h_seq.float())
         logits_2c = torch.stack([torch.zeros_like(logits), logits], dim=-1)
-        return F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)[..., 1].to(pooled_h.dtype)
+        return F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)[..., 1].to(h_seq.dtype)
 
 class StopForwardException(Exception): pass
 
@@ -114,11 +119,11 @@ def gated_forward(model, router, batch, temperature, hard=True):
     labels = batch["labels"]
     base = model.base_model.model.model
     
-    captured_h = None
+    captured_h_seq = None
     def early_stop_hook(module, input, output):
-        nonlocal captured_h
+        nonlocal captured_h_seq
         h = output[0] if isinstance(output, tuple) else output
-        captured_h = h.detach().float().mean(dim=1)
+        captured_h_seq = h.detach().float()
         raise StopForwardException()
 
     handle = base.layers[ALWAYS_KEEP - 1].register_forward_hook(early_stop_hook)
@@ -127,16 +132,16 @@ def gated_forward(model, router, batch, temperature, hard=True):
     except StopForwardException: pass
     finally: handle.remove()
 
-    gates = router(captured_h.to("cuda"), temperature, hard)
+    gates = router(captured_h_seq.to("cuda"), temperature, hard)
     
     handles = []
     def layer_hook(module, input, output, idx):
         residual = input[0]
-        gate = gates[:, idx].view(-1, 1, 1).to(output[0].dtype)
+        gate = gates[:, :, idx].unsqueeze(-1).to(output[0].dtype)
         gated_h = gate * output[0] + (1.0 - gate) * residual
         return (gated_h, *output[1:]) if isinstance(output, tuple) else gated_h
 
-    for i in range(gates.shape[1]):
+    for i in range(gates.shape[2]):
         h = base.layers[i + ALWAYS_KEEP]
         handles.append(h.register_forward_hook(lambda m, a, o, idx=i: layer_hook(m, a, o, idx)))
 
@@ -211,7 +216,7 @@ def main():
         
     for p in PENALTIES:
         name = f"p_{str(p).replace('.', '_')}"
-        routers[name] = GumbelRouter(model.config.hidden_size, num_layers - ALWAYS_KEEP).to("cuda")
+        routers[name] = TokenLevelGumbelRouter(model.config.hidden_size, num_layers - ALWAYS_KEEP).to("cuda")
         
         # Grab only parameters for THIS adapter and THIS router
         adapter_params = [param for n, param in model.named_parameters() if name in n and param.requires_grad]
@@ -324,7 +329,7 @@ def main():
                 next_epoch = 0
                 next_temp = GUMBEL_TEMP_START
             else:
-                next_chunk_idx = chunk_idx
+                next_chunk_idx = chunk_idx  
                 next_epoch = epoch + 1
                 next_temp = cur_temp
 
@@ -361,7 +366,7 @@ def main():
                 b = {k: v.to("cuda") for k, v in b.items()}
                 _, v_ce, v_gates = gated_forward(model, routers[name], b, cur_temp, hard=True)
                 v_losses.append(v_ce.item())
-                v_layers.append(v_gates.float().mean(dim=0).sum().item() + ALWAYS_KEEP)
+                v_layers.append(v_gates.float().mean(dim=(0, 1)).sum().item() + ALWAYS_KEEP)
         
         res = {
             "penalty": p, 
