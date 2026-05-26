@@ -1,52 +1,63 @@
-# Dynamic Layer Routing for LLMs
+# Dynamic Layer Routing: Input-Conditional Compute Allocation in LLMs
 
-This repository contains the source code for researching **True Dynamic Layer Routing** during Large Language Model fine-tuning. The research investigates whether training a lightweight Global Gating Network to dynamically drop transformer layers based on input complexity can accelerate training and inference without degrading downstream performance.
+This repository contains the official PyTorch implementation for our research on **Dynamic Layer Routing (DLR)**. 
 
-## Phase 1: Core Experiments
+DLR introduces a novel, fully differentiable framework for input-conditional compute allocation in pre-trained Large Language Models. Instead of the traditional static paradigm where every token passes through every layer, DLR uses a lightweight **Token-Level Gumbel-STE Router** to dynamically skip transformer decoder layers based on the inherent complexity of each token.
 
-The suite consists of three pure PyTorch fine-tuning loops built on `TinyLlama-1.1B` using LoRA and BFloat16 precision:
+## Key Features & Contributions
 
-1. **`exp1_baseline_finetune.py`**
-   - Standard LoRA fine-tuning using all 22 transformer layers.
-   - Acts as the control group for convergence and VRAM benchmarking.
+1. **Token-Level Granularity**: Trivial tokens (e.g., punctuation, stop words) skip the majority of layers, while complex reasoning tokens receive full-depth processing.
+2. **Contextual Gating**: Routing decisions are conditioned on semantically rich hidden states from the first four "always-kept" layers, rather than raw embeddings.
+3. **No Model Surgery**: The implementation uses a robust hook-based two-pass forward strategy that preserves internal invariants (RoPE, SDPA masking) and works out-of-the-box with HuggingFace models.
+4. **Stable End-to-End Training**: We replace high-variance REINFORCE estimators with a Gumbel-Softmax Straight-Through Estimator (STE), stabilized by Knowledge Distillation (KD) and a novel per-layer sparsity penalty with a target skip ratio regularizer.
 
-2. **`exp2_stochastic_finetune.py`**
-   - Implements **Stochastic Depth Dropout** (50% random layer drop during training).
-   - Demonstrates the "Inference Mismatch" problem when models trained with truncated depths are evaluated on full depths.
+## Experimental Suite
 
-3. **`exp3_dynamic_finetune.py`**
-   - The core novelty: **True Dynamic Routing**.
-   - Integrates a lightweight Global Router (MLP) trained via REINFORCE (Policy Gradient).
-   - The router dynamically scores input embeddings and drops unnecessary layers per-batch during both training and inference.
-   - Uses a compute penalty to encourage sparsity and maximize compute efficiency.
+The repository is structured as a progression of empirical studies, culminating in the final token-level architecture:
 
-## Phase 2: Benchmarks & Trade-offs
+### Phase 1: Baselines
+* **`exp1_baseline_finetune.py`**: Standard static LoRA fine-tuning (full depth, 22 layers). The accuracy upper-bound.
+* **`exp2_stochastic_finetune.py`**: Stochastic Depth Dropout (50% random layer drop during training). Highlights the "inference mismatch" problem of input-agnostic dropout methods.
 
-4. **`exp4_inference_benchmark.py`**
-   - Physically benchmarks the hardware inference speed across varying active layer counts.
-   - Proves linear speedup in Tokens Per Second (TPS) as the dynamic router drops layers.
+### Phase 2: Sequence-Level Routing
+* **`exp6_gumbel_router.py`**: The first DLR variant using sequence-level routing (one routing decision per sample). Reduces active layers by ~40% while maintaining near-parity with the static baseline.
+* **`exp8_gumbel_pareto_sweep.py`**: Automated hyperparameter sweep over the compute penalty (`λ`) to generate the Accuracy vs. Compute Pareto frontier.
 
-5. **`exp5_pareto_sweep.py`**
-   - Executes an automated hyperparameter sweep over the `COMPUTE_PENALTY` using the original REINFORCE router.
-   - Generates the data required to plot the Accuracy vs. Compute Pareto Frontier.
+### Phase 3: Token-Level Routing (Final Architecture)
+* **`exp9_token_level_routing.py`**: Initial token-level routing experiments.
+* **`exp10_token_routing_v2.py`**: **Our primary contribution.** Token-level routing stabilized with per-layer L1 penalties and quadratic target regularizers to prevent router collapse/over-skipping. 
+* **`exp9_ablation_no_kd.py`**: Ablation study verifying the necessity of the frozen teacher KD loss.
 
-## Phase 3: Production-Grade Gumbel Router
+### Evaluation & Benchmarking
+* **`exp7_eval_harness.py`**: Integration with `lm-evaluation-harness` to run zero-shot benchmarks (MMLU, ARC-Challenge, GSM8K) and calculate WikiText-103 perplexity.
+* **`exp4_inference_benchmark.py`**: Physical hardware benchmarking script to measure actual wall-clock speedup (Tokens Per Second) and latency.
+* **`plot_results.py`**: Automated visualization suite that parses CSV logs and generates 10+ publication-ready figures (training dynamics, Pareto curves, and benchmark bar charts).
 
-6. **`exp6_gumbel_router.py`**
-   - Replaces the high-variance REINFORCE estimator with a **Gumbel-Softmax Straight-Through Estimator (STE)** for fully differentiable, end-to-end training.
-   - Upgrades routing granularity from batch-level to **per-sample** gates (each sample independently decides which layers to execute).
-   - Router reads **contextual hidden states** (post layer 4) rather than raw embeddings.
-   - Integrates a **Knowledge Distillation (KD) loss** using the frozen Baseline (exp1) as teacher.
-   - Scales training to **Wikitext-103-raw-v1** (10,000 samples) for 3 epochs.
-   - Implements model checkpointing (saves LoRA adapter + router weights on best val loss).
-   - **Status:** Completed. 3-epoch run on Wikitext-103 achieved stable convergence and high-fidelity Pareto data.
+## Getting Started
 
-### Planned Next Experiments
-- **`exp7_gumbel_pareto_sweep.py`** *(Planned)*: Pareto sweep using the exp6 Gumbel-STE architecture to generate a Pareto frontier comparable to exp5 but with the improved router.
-- **`exp8_token_level_routing.py`** *(Planned)*: Token-level (rather than sequence-level) routing — individual tokens independently exit or skip layers.
-- **Evaluation Harness** *(Planned)*: Integration with EleutherAI's `lm-evaluation-harness` for zero-shot MMLU, GSM8K, and ARC-Challenge benchmarks.
+### 1. Requirements
+```bash
+pip install torch transformers peft datasets accelerate bitsandbytes lm-eval matplotlib pandas
+```
 
-## Analysis & Visualization
-- **`plot_results.py`**: Automatically parses the generated metric CSVs from all experiments and generates publication-ready visualizations:
-  - **Phase 1-2 (7 plots):** Convergence lines, final bar charts, inference speedup, and the Pareto Frontier curve.
-  - **Phase 3 (3 additional plots):** Loss component breakdown (CE + KD + Gate), Gumbel temperature annealing, and a head-to-head val loss comparison across all 4 experiments.
+### 2. Training the Token-Level Router
+To train the final token-level architecture on TinyLlama-1.1B:
+```bash
+python exp10_token_routing_v2.py --fresh
+```
+
+### 3. Evaluation
+Once training completes, evaluate the saved checkpoints against the MMLU, ARC, and GSM8K benchmarks:
+```bash
+python exp7_eval_harness.py
+```
+
+### 4. Benchmarking Latency
+Measure the true hardware acceleration (Tokens Per Second) achieved by bypassing the skipped layers:
+```bash
+python exp4_inference_benchmark.py
+```
+
+## Results
+
+*Please refer to `manuscript_draft.md` for our full methodology, empirical analysis, and final benchmark numbers comparing DLR against static and stochastic baselines.*

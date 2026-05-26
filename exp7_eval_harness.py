@@ -7,7 +7,8 @@ to prove that reasoning capability is preserved when compute is dynamically redu
 Model variants evaluated:
   1. baseline_lora    : exp1 static LoRA checkpoint (upper-bound accuracy)
   2. stochastic       : exp2 stochastic dropout checkpoint
-  3. gumbel_router    : exp6 Gumbel-STE checkpoint (our main contribution)
+  3. gumbel_router    : exp6 Gumbel-STE checkpoint (sequence-level routing)
+  4. token_router     : exp10 token-level routing checkpoint (our main contribution)
 
 Output:
   - exp7_eval_results_<timestamp>.csv  : full per-task accuracy table
@@ -66,6 +67,12 @@ parser.add_argument(
     default=None,
     help="Path to exp6 Gumbel router checkpoint dir (auto-detected if None)",
 )
+parser.add_argument(
+    "--token_path",
+    type=str,
+    default=None,
+    help="Path to exp10 token-level router checkpoint dir (auto-detected if None; falls back to exp9)",
+)
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -95,6 +102,9 @@ def _latest_checkpoint(pattern: str) -> Optional[Path]:
 BASELINE_PATH   = Path(args.baseline_path)   if args.baseline_path   else _latest_checkpoint("exp1_baseline_output_*")
 STOCHASTIC_PATH = Path(args.stochastic_path) if args.stochastic_path else _latest_checkpoint("exp2_stochastic_output_*")
 GUMBEL_PATH     = Path(args.gumbel_path)     if args.gumbel_path     else _latest_checkpoint("exp6_gumbel_output_*")
+# Token-level: prefer exp10 (fixed), fall back to exp9
+TOKEN_PATH      = (Path(args.token_path) if args.token_path
+                   else (_latest_checkpoint("exp10_token_output_*") or _latest_checkpoint("exp9_token_output_*")))
 
 TIMESTAMP   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CSV_OUT     = RESEARCH_DIR / f"exp7_eval_results_{TIMESTAMP}.csv"
@@ -507,16 +517,27 @@ def main():
         all_results.append(r)
         torch.cuda.empty_cache()
 
-    # ── 4. Gumbel Router (exp6 — our contribution) ───────────────────────────
-    print("\n[4/4] Gumbel Router (exp6 — Gumbel-STE + KD)")
+    # ── 4. Gumbel Router (exp6 — sequence-level routing) ────────────────────
+    print("\n[4/5] Gumbel Router (exp6 — Gumbel-STE + KD, sequence-level)")
     r = evaluate_variant("gumbel_router", load_gumbel_checkpoint, GUMBEL_PATH, is_gumbel=True)
     all_results.append(r)
 
+    # ── 5. Token-Level Router (exp10/exp9 — our main contribution) ─────────
+    if TOKEN_PATH is not None:
+        exp_label = "exp10" if "exp10" in str(TOKEN_PATH) else "exp9"
+        print(f"\n[5/5] Token-Level Router ({exp_label} — token-level routing)")
+        r = evaluate_variant("token_router", load_gumbel_checkpoint, TOKEN_PATH, is_gumbel=True)
+        all_results.append(r)
+    else:
+        print("\n[5/5] Token-Level Router — skipped (no checkpoint found)")
+
     # ── BONUS: Per-Layer Skip Analysis ────────────────────────────────────────
-    if GUMBEL_PATH is not None and Path(GUMBEL_PATH).exists():
-        print("\n[BONUS] Computing per-layer skip rate for paper Figure 7...")
-        g_model, g_tok = load_gumbel_checkpoint(GUMBEL_PATH)
-        plot_per_layer_skip_rate(g_model, g_tok, GUMBEL_PATH)
+    # Prefer token-level model for skip analysis (more interesting per-token patterns)
+    skip_analysis_path = TOKEN_PATH if (TOKEN_PATH and Path(TOKEN_PATH).exists()) else GUMBEL_PATH
+    if skip_analysis_path is not None and Path(skip_analysis_path).exists():
+        print(f"\n[BONUS] Computing per-layer skip rate from {skip_analysis_path}...")
+        g_model, g_tok = load_gumbel_checkpoint(skip_analysis_path)
+        plot_per_layer_skip_rate(g_model, g_tok, skip_analysis_path)
         del g_model, g_tok
 
     torch.cuda.empty_cache()
@@ -548,6 +569,7 @@ def main():
             "baseline": str(BASELINE_PATH),
             "stochastic": str(STOCHASTIC_PATH),
             "gumbel": str(GUMBEL_PATH),
+            "token_router": str(TOKEN_PATH),
         },
         "results": all_results,
     }

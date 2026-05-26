@@ -75,30 +75,44 @@ def main():
         # Restore original layers for DLR testing
         model.model.layers = nn.ModuleList(list(original_layers))
         
-        # Now run real Gumbel-STE DLR timing
-        print("\nBenchmarking DLR (Gated Two-Pass Inference)...")
-        from exp6_gumbel_router import GumbelRouter, GatedForwardContext
+        # Now run real Gumbel-STE DLR timing (Token-Level)
+        print("\nBenchmarking DLR (Token-Level Gated Two-Pass Inference)...")
+        from exp10_token_routing_v2 import TokenLevelGumbelRouter, TokenGatedForwardContext
         
         ALWAYS_KEEP = 4
         ROUTABLE = TOTAL_LAYERS - ALWAYS_KEEP
         
         # Load a dummy router (untrained) just for timing
-        router = GumbelRouter(model.config.hidden_size, ROUTABLE).to("cuda", dtype=torch.float32)
+        router = TokenLevelGumbelRouter(model.config.hidden_size, ROUTABLE).to("cuda")
         router.eval()
         
         def gated_fwd(input_ids):
             transformer = model.model
             all_layers  = transformer.layers
-            ctx = GatedForwardContext()
-            ctx.install_capture_hook(all_layers[ALWAYS_KEEP - 1])
-            _ = model(input_ids=input_ids)
-            ctx.remove_hooks()
+            ctx = TokenGatedForwardContext()
             
-            pooled_h = ctx.captured_h.to("cuda")
-            gates    = router(pooled_h, temperature=0.5, hard=True)
+            # Use early stop hook pattern from exp10
+            class StopForwardException(Exception): pass
+            def early_stop_hook(module, input, output):
+                hidden_state = output[0] if isinstance(output, tuple) else output
+                ctx.captured_h_seq = hidden_state.detach().float()
+                raise StopForwardException()
+                
+            handle = all_layers[ALWAYS_KEEP - 1].register_forward_hook(early_stop_hook)
+            try:
+                with torch.no_grad():
+                    _ = model(input_ids=input_ids)
+            except StopForwardException:
+                pass
+            finally:
+                handle.remove()
+            
+            h_seq = ctx.captured_h_seq.to("cuda")
+            gates = router(h_seq, temperature=0.5, hard=True)
             
             ctx.install_gate_hooks(all_layers[ALWAYS_KEEP:], gates)
-            out = model(input_ids=input_ids)
+            with torch.no_grad():
+                out = model(input_ids=input_ids)
             ctx.remove_hooks()
             return out, gates
 
@@ -112,7 +126,8 @@ def main():
         total_active_layers = 0
         for _ in range(NUM_BATCHES):
             _, gates = gated_fwd(inputs["input_ids"])
-            total_active_layers += gates.float().mean(dim=0).sum().item() + ALWAYS_KEEP
+            # average active layers across batch and sequence, sum across layers
+            total_active_layers += gates.float().mean(dim=(0, 1)).sum().item() + ALWAYS_KEEP
             
         torch.cuda.synchronize()
         end_time = time.time()

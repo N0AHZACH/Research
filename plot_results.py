@@ -11,6 +11,8 @@ def get_latest_csv(prefix):
         files = glob.glob(f"{prefix}_*.csv")
     elif "exp7_eval" in prefix:
         files = glob.glob(f"{prefix}_*.csv")
+    elif "exp10_token_routing" in prefix or "exp9_token_level_routing" in prefix:
+        files = glob.glob(f"{prefix}_*.csv")
     else:
         files = glob.glob(f"{prefix}_metrics_*.csv")
     if not files:
@@ -159,9 +161,11 @@ def main():
     if exp8_files:
         pareto_file = sorted(exp8_files, key=os.path.getmtime, reverse=True)[0]
         df_par = pd.read_csv(pareto_file)
-        # Normalize column name: exp8 uses 'Penalty', exp5 used 'Compute Penalty'
+        # Normalize column names: exp8 uses 'Penalty'/'Val Loss', exp5 used 'Compute Penalty'/'Validation Loss'
         if 'Penalty' in df_par.columns and 'Compute Penalty' not in df_par.columns:
             df_par.rename(columns={'Penalty': 'Compute Penalty'}, inplace=True)
+        if 'Val Loss' in df_par.columns and 'Validation Loss' not in df_par.columns:
+            df_par.rename(columns={'Val Loss': 'Validation Loss'}, inplace=True)
         print(f"  Using exp8 Gumbel Pareto data: {pareto_file}")
     elif pareto_files:
         pareto_file = sorted(pareto_files, key=os.path.getmtime, reverse=True)[0]
@@ -307,10 +311,23 @@ def main():
 
         # ------------------------------------------------------------------
         # 10. Head-to-head Validation Loss: Baseline vs Stochastic vs
-        #     Dynamic (REINFORCE) vs Gumbel Router
+        #     Dynamic (REINFORCE) vs Gumbel Router vs Token-Level Router
         # ------------------------------------------------------------------
         # Pull eval rows from each Phase 1 experiment
         val6 = df6.dropna(subset=["Validation Loss"]).copy()
+
+        # Load token-level routing data (prefer exp10 over exp9)
+        exp10_file = get_latest_csv("exp10_token_routing_v2")
+        exp9_file  = None
+        if not exp10_file:
+            # Fallback to exp9 CSVs
+            exp9_files = glob.glob("exp9_token_level_routing_*.csv")
+            exp9_files = [f for f in exp9_files if os.path.getsize(f) > 200]
+            if exp9_files:
+                exp9_files.sort(key=os.path.getmtime, reverse=True)
+                exp9_file = exp9_files[0]
+        token_file = exp10_file or exp9_file
+        token_label = "Token-Level Router (exp10)" if exp10_file else "Token-Level Router (exp9)"
 
         if not val6.empty:
             plt.figure(figsize=(12, 6))
@@ -326,18 +343,87 @@ def main():
             plt.plot(val6["Global Step"], val6["Validation Loss"],
                      label="Gumbel-STE Router (exp6)", color="#9467bd", linewidth=2.5,
                      marker="D", markersize=6, linestyle="--")
+            # Add token-level routing data if available
+            if token_file:
+                df_token = pd.read_csv(token_file)
+                df_token["Validation Loss"] = pd.to_numeric(df_token["Validation Loss"], errors="coerce")
+                val_token = df_token.dropna(subset=["Validation Loss"]).copy()
+                if not val_token.empty:
+                    plt.plot(val_token["Global Step"], val_token["Validation Loss"],
+                             label=token_label, color="#e74c3c", linewidth=2.5,
+                             marker="P", markersize=7, linestyle="-.")
             plt.title("Validation Loss: All Experiments (Phase 1-3)",
                       fontsize=16, fontweight="bold", pad=15)
             plt.xlabel("Global Step", fontsize=14)
             plt.ylabel("Validation Loss", fontsize=14)
-            plt.legend(fontsize=12, frameon=True, shadow=True)
+            plt.legend(fontsize=11, frameon=True, shadow=True)
             plt.grid(True, linestyle="--", alpha=0.7)
             plt.tight_layout()
             plt.savefig("all_experiments_val_loss.png", dpi=300, bbox_inches="tight")
             plt.close()
             print("  -> all_experiments_val_loss.png")
 
-        print(f"\nPhase 3 plotting complete! Generated 3 additional exp6 visualizations.")
+        # ------------------------------------------------------------------
+        # 10b. Token-Level Router Training Dynamics (exp10/exp9)
+        # ------------------------------------------------------------------
+        if token_file:
+            print(f"\nFound token-level routing data: {token_file}")
+            df_tok = pd.read_csv(token_file)
+            df_tok["CE Loss"]       = pd.to_numeric(df_tok["CE Loss"],       errors="coerce")
+            df_tok["KD Loss"]       = pd.to_numeric(df_tok["KD Loss"],       errors="coerce")
+            df_tok["Gate Loss"]     = pd.to_numeric(df_tok["Gate Loss"],     errors="coerce")
+            df_tok["Avg Active Layers"] = pd.to_numeric(df_tok["Avg Active Layers"], errors="coerce")
+            df_tok["Gumbel Temp"]   = pd.to_numeric(df_tok["Gumbel Temp"],   errors="coerce")
+
+            # Token-level loss breakdown
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(df_tok["Global Step"], df_tok["CE Loss"].ewm(alpha=0.2).mean(),
+                    label="CE Loss", color="#1f77b4", linewidth=2)
+            ax.plot(df_tok["Global Step"], df_tok["KD Loss"].ewm(alpha=0.2).mean(),
+                    label="KD Loss", color="#ff7f0e", linewidth=2)
+            ax.plot(df_tok["Global Step"], df_tok["Gate Loss"].ewm(alpha=0.2).mean(),
+                    label="Gate Sparsity Loss", color="#2ca02c", linewidth=2)
+            tok_title = "exp10" if exp10_file else "exp9"
+            ax.set_title(f"{tok_title}: Token-Level Router Loss Breakdown",
+                         fontsize=16, fontweight="bold", pad=15)
+            ax.set_xlabel("Global Step", fontsize=14)
+            ax.set_ylabel("Loss", fontsize=14)
+            ax.legend(fontsize=12, frameon=True, shadow=True)
+            ax.grid(True, linestyle="--", alpha=0.7)
+            plt.tight_layout()
+            plt.savefig("exp10_loss_breakdown.png", dpi=300, bbox_inches="tight")
+            plt.close()
+            print("  -> exp10_loss_breakdown.png")
+
+            # Token-level layer activity over training
+            fig, ax1 = plt.subplots(figsize=(10, 5))
+            color_temp = "#9467bd"
+            ax1.plot(df_tok["Global Step"], df_tok["Gumbel Temp"],
+                     color=color_temp, linewidth=2.5, marker="o", markersize=4)
+            ax1.set_xlabel("Global Step", fontsize=14)
+            ax1.set_ylabel("Gumbel Temperature", fontsize=14, color=color_temp)
+            ax1.tick_params(axis="y", labelcolor=color_temp)
+            ax1.set_ylim(0, 1.1)
+
+            ax2 = ax1.twinx()
+            valid_layers = df_tok["Avg Active Layers"].dropna()
+            valid_steps  = df_tok.loc[valid_layers.index, "Global Step"]
+            ax2.plot(valid_steps, valid_layers, color="#e74c3c",
+                     linewidth=2.5, linestyle="--", marker="s", markersize=4,
+                     label="Avg Active Layers")
+            ax2.axhline(y=12.1, color="#888888", linestyle=":", linewidth=1, alpha=0.7, label="Target (~55%)")
+            ax2.set_ylabel("Avg Active Layers", fontsize=14, color="#e74c3c")
+            ax2.tick_params(axis="y", labelcolor="#e74c3c")
+
+            plt.title(f"{tok_title}: Token-Level Routing — Temp Annealing vs. Layer Activity",
+                      fontsize=14, fontweight="bold", pad=15)
+            ax2.legend(fontsize=10, loc="upper right")
+            fig.tight_layout()
+            plt.savefig("exp10_temp_annealing.png", dpi=300, bbox_inches="tight")
+            plt.close()
+            print("  -> exp10_temp_annealing.png")
+
+        print(f"\nPhase 3 plotting complete!")
     else:
         print("\nNo exp6 Gumbel metrics found (all runs were empty / crashed). Skipping Phase 3 plots.")
 

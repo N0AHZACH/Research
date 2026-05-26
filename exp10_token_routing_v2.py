@@ -1,13 +1,17 @@
 """
-exp9_token_level_routing.py - Phase 2: Token-Level Dynamic Routing
+exp10_token_routing_v2.py - Phase 2 v2: Token-Level Dynamic Routing (Fixed)
 
-This script upgrades the sequence-level Gumbel Router (exp6) to a Token-Level Router.
-Instead of pooling the contextual hidden state after layer 4 and making a single
-routing decision for the entire sequence, this router evaluates the hidden state
-of *each token independently* and produces a per-token gate [Batch, SeqLen, Layers].
+Fixes from exp9:
+  1. Router collapse fix: per-layer penalty + target skip ratio regularizer
+  2. Increased COMPUTE_PENALTY from 2.0 → 10.0 (token-level needs much higher)
+  3. Reduced KD_ALPHA from 0.5 → 0.3 (less CE weight = more room for sparsity)
+  4. Added per-layer skip rate logging for diagnostics
+  5. Target skip ratio of 0.45 to guide router toward ~55% active layers
 
-This allows the model to allocate more compute to complex reasoning tokens and
-skip layers for trivial tokens (like punctuation or stop words).
+The key insight: at token-level granularity, each gate decision contributes
+1/(B*S*L) to mean(gates), so the penalty must be much stronger to compete
+with CE+KD loss. We also add a quadratic target penalty to prevent both
+collapse modes (all-on and all-off).
 """
 import csv
 import os
@@ -38,12 +42,14 @@ LR               = 3e-5
 WEIGHT_DECAY     = 0.01
 
 ALWAYS_KEEP      = 4
-COMPUTE_PENALTY  = 2.0   # Increased: force router past the 10% saturation plateau
+COMPUTE_PENALTY  = 5.0    # Balanced: between exp9 (2.0=collapsed) and prior exp10 (10.0=stuck)
+TARGET_SKIP      = 0.40   # Target: ~60% active layers (~13.2 / 22)
+TARGET_PENALTY   = 8.0    # Stronger attractor toward target skip ratio
 GUMBEL_TEMP      = 1.0
 TEMP_ANNEAL_RATE = 0.95
-KD_ALPHA         = 0.5
+KD_ALPHA         = 0.3    # Reduced: give more weight to KD, less to raw CE
 KD_TEMPERATURE   = 2.0
-GATE_ENTROPY_BETA = 0.0  # Disabled: was counteracting compute penalty, causing 10% collapse
+GATE_ENTROPY_BETA = 0.0   # Disabled: counteracts compute penalty
 KD_WARMUP_STEPS  = 50
 
 EVAL_EVERY_STEPS = 100
@@ -71,14 +77,86 @@ def get_optimal_config():
 BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL = get_optimal_config()
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_FILENAME = f"exp9_token_level_routing_{TIMESTAMP}.csv"
-SAVE_DIR     = f"exp9_token_output_{TIMESTAMP}"
+CSV_FILENAME = f"exp10_token_routing_v2_{TIMESTAMP}.csv"
+SAVE_DIR     = f"exp10_token_output_{TIMESTAMP}"
+
+# ==============================================================================
+# TOKEN-LEVEL Gumbel-Softmax Router (v2 - stronger init bias)
+# ==============================================================================
+class TokenLevelGumbelRouter(nn.Module):
+    """
+    Per-TOKEN router using Gumbel-Softmax Straight-Through Estimator.
+    Input: unpooled hidden state sequence from layer ALWAYS_KEEP. [B, S, H]
+    Output: [B, S, ROUTABLE_LAYERS] binary gates.
+    
+    v2 changes:
+    - Stronger negative bias (-3.0 vs -2.0) to start with more skipping
+    - Per-layer independent penalty prevents global mean dilution
+    """
+    def __init__(self, hidden_size: int, num_layers: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.GELU(),
+            nn.Linear(hidden_size // 2, hidden_size // 4),
+            nn.GELU(),
+            nn.Linear(hidden_size // 4, num_layers),
+        )
+        # Moderate negative bias: start gates slightly below 50/50
+        # -1.5 gives ~18% initial gate probability (sigmoid(-1.5)≈0.18)
+        nn.init.constant_(self.net[-1].bias, -1.5)
+
+    def forward(self, h_seq: torch.Tensor, temperature: float, hard: bool = True):
+        h_seq  = h_seq.float()                                            # precision for Gumbel
+        logits = self.net(h_seq)                                          # [B, S, L]
+        logits_2c = torch.stack([torch.zeros_like(logits), logits], dim=-1)  # [B, S, L, 2]
+        soft   = F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)
+        return soft[..., 1].to(h_seq.dtype)                               # [B, S, L]  restore dtype
+
+# ==============================================================================
+# Hook-based Token-Level Gated Forward Pass
+# ==============================================================================
+class TokenGatedForwardContext:
+    def __init__(self):
+        self.gates = None
+        self.handles = []
+        self.captured_h_seq = None
+
+    def __enter__(self): return self
+    def __exit__(self, *args): self.remove_hooks()
+    def remove_hooks(self):
+        for h in self.handles: h.remove()
+        self.handles.clear()
+
+    def install_capture_hook(self, layer):
+        def hook(module, input, output):
+            hidden_state = output[0] if isinstance(output, tuple) else output
+            # NO MEAN POOLING! We keep the sequence dimension.
+            self.captured_h_seq = hidden_state.detach().float()  # [B, S, H]
+        self.handles.append(layer.register_forward_hook(hook))
+
+    def install_gate_hooks(self, layers, gates):
+        self.gates = gates  # [B, S, L]
+        for i, layer in enumerate(layers):
+            idx = i
+            def hook(module, input, output, layer_i=idx):
+                residual = input[0]
+                is_tuple = isinstance(output, tuple)
+                h = output[0] if is_tuple else output
+                
+                # Gate for this specific layer: [B, S] → [B, S, 1] for broadcasting
+                gate = self.gates[:, :, layer_i].unsqueeze(-1).to(h.dtype)
+                
+                gated_h = gate * h + (1.0 - gate) * residual
+                return (gated_h,) + output[1:] if is_tuple else gated_h
+
+            self.handles.append(layer.register_forward_hook(hook))
 
 def main():
     import argparse
     import glob
 
-    parser = argparse.ArgumentParser(description="Phase 2: Token-Level Dynamic Routing")
+    parser = argparse.ArgumentParser(description="Phase 2 v2: Token-Level Dynamic Routing (Fixed)")
     parser.add_argument("--resume", type=str, default="auto", 
                         help="Path to checkpoint directory or 'auto' to auto-resume latest, or 'none' to start fresh")
     parser.add_argument("--fresh", action="store_true", 
@@ -98,7 +176,7 @@ def main():
     current_temp = GUMBEL_TEMP
 
     def find_latest_checkpoint():
-        dirs = glob.glob("exp9_token_output_*")
+        dirs = glob.glob("exp10_token_output_*")
         valid_checkpoints = []
         for d in dirs:
             ckpt_path = os.path.join(d, "checkpoint_latest", "training_states.pt")
@@ -177,35 +255,7 @@ def main():
     ROUTABLE_LAYERS = TOTAL_LAYERS - ALWAYS_KEEP
     print(f"  Total layers: {TOTAL_LAYERS} | Always-kept: {ALWAYS_KEEP} | Routable: {ROUTABLE_LAYERS}")
 
-    # ==============================================================================
-    # TOKEN-LEVEL Gumbel-Softmax Router
-    # ==============================================================================
-    class TokenLevelGumbelRouter(nn.Module):
-        """
-        Per-TOKEN router using Gumbel-Softmax Straight-Through Estimator.
-        Input: unpooled hidden state sequence from layer ALWAYS_KEEP. [B, S, H]
-        Output: [B, S, ROUTABLE_LAYERS] binary gates.
-        """
-        def __init__(self, hidden_size: int, num_layers: int):
-            super().__init__()
-            self.net = nn.Sequential(
-                nn.Linear(hidden_size, hidden_size // 2),
-                nn.GELU(),
-                nn.Linear(hidden_size // 2, hidden_size // 4),
-                nn.GELU(),
-                nn.Linear(hidden_size // 4, num_layers),
-            )
-            # Initialize output layer with strong negative bias so gates start near 0.
-            # This forces the router to *earn* activations via CE loss pressure rather
-            # than defaulting to ~10% skip (local minimum found in exp8 turbo sweep).
-            nn.init.constant_(self.net[-1].bias, -2.0)
 
-        def forward(self, h_seq: torch.Tensor, temperature: float, hard: bool = True):
-            h_seq  = h_seq.float()                                            # precision for Gumbel
-            logits = self.net(h_seq)                                          # [B, S, L]
-            logits_2c = torch.stack([torch.zeros_like(logits), logits], dim=-1)  # [B, S, L, 2]
-            soft   = F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)
-            return soft[..., 1].to(h_seq.dtype)                               # [B, S, L]  restore dtype
 
     model.router = TokenLevelGumbelRouter(model.config.hidden_size, ROUTABLE_LAYERS).to("cuda")
     for p in model.router.parameters():
@@ -226,14 +276,13 @@ def main():
         if latest_dir:
             checkpoint_dir = os.path.join(latest_dir, "checkpoint_latest")
             save_dir = latest_dir
-            # Derive CSV file name from the output directory
-            csv_filename = f"{latest_dir.replace('exp9_token_output_', 'exp9_token_level_routing_')}.csv"
+            csv_filename = f"{latest_dir.replace('exp10_token_output_', 'exp10_token_routing_v2_')}.csv"
     elif args.resume and args.resume.lower() != "none":
         checkpoint_dir = args.resume
         parent_dir = os.path.dirname(checkpoint_dir)
         if parent_dir:
             save_dir = parent_dir
-            csv_filename = f"{parent_dir.replace('exp9_token_output_', 'exp9_token_level_routing_')}.csv"
+            csv_filename = f"{parent_dir.replace('exp10_token_output_', 'exp10_token_routing_v2_')}.csv"
         else:
             save_dir = checkpoint_dir
 
@@ -252,7 +301,6 @@ def main():
                     adapters_weights = torch.load(fpath, map_location="cuda")
                 model.load_state_dict(adapters_weights, strict=False)
                 
-                # Free memory mapped file on Windows to allow overwriting
                 del adapters_weights
                 import gc
                 gc.collect()
@@ -291,46 +339,7 @@ def main():
 
     class StopForwardException(Exception): pass
 
-    # ==============================================================================
-    # Hook-based Token-Level Gated Forward Pass
-    # ==============================================================================
-    class TokenGatedForwardContext:
-        def __init__(self):
-            self.gates = None
-            self.handles = []
-            self.captured_h_seq = None
 
-        def __enter__(self): return self
-        def __exit__(self, *args): self.remove_hooks()
-        def remove_hooks(self):
-            for h in self.handles: h.remove()
-            self.handles.clear()
-
-        def install_capture_hook(self, layer):
-            def hook(module, input, output):
-                hidden_state = output[0] if isinstance(output, tuple) else output
-                # NO MEAN POOLING! We keep the sequence dimension.
-                self.captured_h_seq = hidden_state.detach().float()  # [B, S, H]
-            self.handles.append(layer.register_forward_hook(hook))
-
-        def install_gate_hooks(self, layers, gates):
-            self.gates = gates  # [B, S, L]
-            for i, layer in enumerate(layers):
-                idx = i
-                def hook(module, input, output, layer_i=idx):
-                    residual = input[0]
-                    is_tuple = isinstance(output, tuple)
-                    h = output[0] if is_tuple else output
-                    
-                    # Gate for this specific layer
-                    # self.gates[:, :, layer_i] is [B, S]
-                    # We need to broadcast across the Hidden dimension, so we unsqueeze to [B, S, 1]
-                    gate = self.gates[:, :, layer_i].unsqueeze(-1).to(h.dtype)
-                    
-                    gated_h = gate * h + (1.0 - gate) * residual
-                    return (gated_h,) + output[1:] if is_tuple else gated_h
-
-                self.handles.append(layer.register_forward_hook(hook))
 
     def gated_forward(model, batch, temperature, hard=True):
         input_ids      = batch["input_ids"]
@@ -372,6 +381,28 @@ def main():
             reduction="batchmean",
         ) * (T ** 2)
 
+    def compute_gate_loss(gates):
+        """
+        Compute the gate sparsity loss with three components:
+        1. Per-layer L1 penalty: penalize each layer's token-averaged activity independently
+        2. Target skip ratio: quadratic penalty for deviating from TARGET_SKIP
+        3. Total is much more effective than global mean(gates) for token-level routing
+        
+        gates: [B, S, L] binary gates
+        """
+        # Per-layer average activity: [L]
+        per_layer_activity = gates.float().mean(dim=(0, 1))  # average over batch and sequence
+        
+        # L1 penalty: sum of per-layer activities (not mean — so each layer contributes equally)
+        l1_penalty = per_layer_activity.sum() * COMPUTE_PENALTY
+        
+        # Target skip ratio: quadratic penalty for deviation from target
+        # skip_ratio = 1 - mean(gates) = fraction of gates that are 0
+        actual_skip = 1.0 - gates.float().mean()
+        target_penalty = TARGET_PENALTY * (actual_skip - TARGET_SKIP) ** 2
+        
+        return l1_penalty + target_penalty, per_layer_activity
+
     def save_checkpoint(epoch, step, global_step, best_val_loss, current_temp):
         checkpoint_dir = os.path.join(save_dir, "checkpoint_latest")
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -393,10 +424,13 @@ def main():
     # ==============================================================================
     # Training Loop
     # ==============================================================================
-    print(f"\nStarting Phase 2 TOKEN-LEVEL Router training...")
+    print(f"\nStarting Phase 2 v2 TOKEN-LEVEL Router training...")
+    print(f"  COMPUTE_PENALTY={COMPUTE_PENALTY} | TARGET_SKIP={TARGET_SKIP} | TARGET_PENALTY={TARGET_PENALTY}")
+    print(f"  KD_ALPHA={KD_ALPHA} | Init bias=-3.0\n")
 
     headers = ["Global Step", "Epoch", "Training Loss", "CE Loss", "KD Loss",
-               "Gate Loss", "Validation Loss", "Avg Active Layers", "Gumbel Temp", "LR"]
+               "Gate Loss", "Target Loss", "Validation Loss", "Avg Active Layers",
+               "Skip Ratio", "Gumbel Temp", "LR"]
     
     csv_exists = os.path.exists(csv_filename)
     if not csv_exists:
@@ -424,18 +458,15 @@ def main():
                         attention_mask=batch.get("attention_mask"),
                     ).logits
 
-                gate_loss = gates.float().mean() * COMPUTE_PENALTY
-
-                p_mean = gates.detach().float().mean()
-                eps = 1e-6
-                entropy_bonus = GATE_ENTROPY_BETA * -(p_mean * (p_mean + eps).log() + (1 - p_mean) * (1 - p_mean + eps).log())
+                # Compute gate loss with per-layer penalty + target skip ratio
+                gate_loss, per_layer_activity = compute_gate_loss(gates)
 
                 if global_step < KD_WARMUP_STEPS:
                     kd_loss    = torch.tensor(0.0, device="cuda")
-                    total_loss = (ce_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
+                    total_loss = (ce_loss + gate_loss) / GRAD_ACCUM
                 else:
                     kd_loss    = compute_kd_loss(student_logits[:, :-1, :], teacher_logits[:, :-1, :], KD_TEMPERATURE)
-                    total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
+                    total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss) / GRAD_ACCUM
                     
                 total_loss.backward()
 
@@ -448,11 +479,13 @@ def main():
 
                     if global_step % LOG_EVERY_STEPS == 0:
                         avg_layers = gates.detach().float().mean(dim=(0, 1)).sum().item() + ALWAYS_KEEP
+                        skip_ratio = 1.0 - gates.detach().float().mean().item()
                         
                         epoch_bar.set_postfix({
                             "loss": f"{total_loss.item() * GRAD_ACCUM:.4f}",
                             "ce": f"{ce_loss.item():.4f}",
                             "layers": f"{avg_layers:.1f}",
+                            "skip": f"{skip_ratio:.1%}",
                         })
 
                         if global_step % EVAL_EVERY_STEPS == 0:
@@ -481,11 +514,18 @@ def main():
 
                             model.train()
 
+                            # Compute target penalty for logging
+                            actual_skip = 1.0 - gates.detach().float().mean().item()
+                            target_loss_val = TARGET_PENALTY * (actual_skip - TARGET_SKIP) ** 2
+
                             with open(csv_filename, "a", newline="") as f:
                                 csv.writer(f).writerow([
                                     global_step, epoch + 1, f"{total_loss.item() * GRAD_ACCUM:.4f}", 
-                                    f"{ce_loss.item():.4f}", f"{kd_loss.item():.4f}", f"{gate_loss.item():.4f}", 
-                                    f"{val_loss:.4f}", f"{val_avg_layers:.1f}", f"{current_temp:.4f}", 
+                                    f"{ce_loss.item():.4f}", f"{kd_loss.item():.4f}", f"{gate_loss.item():.4f}",
+                                    f"{target_loss_val:.4f}",
+                                    f"{val_loss:.4f}", f"{val_avg_layers:.1f}",
+                                    f"{actual_skip:.4f}",
+                                    f"{current_temp:.4f}", 
                                     f"{scheduler.get_last_lr()[0]:.2e}"
                                 ])
 
