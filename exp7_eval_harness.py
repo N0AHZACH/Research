@@ -41,7 +41,7 @@ parser = argparse.ArgumentParser(description="Phase 3.4 Evaluation Harness")
 parser.add_argument("--tasks", nargs="+",
                     default=["mmlu", "gsm8k", "arc_challenge"],
                     help="Benchmark tasks to run")
-parser.add_argument("--num_fewshot", type=int, default=0,
+parser.add_argument("--num_fewshot", type=int, default=5,
                     help="Number of few-shot examples (0 = zero-shot)")
 parser.add_argument("--limit", type=int, default=None,
                     help="Limit number of samples per task (for fast debug runs)")
