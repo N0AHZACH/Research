@@ -169,7 +169,7 @@ Evaluated with EleutherAI `lm-evaluation-harness` v0.4 (Gao et al., 2021), zero-
 | Base TinyLlama | 24.67% ±0.36% | 32.85% ±1.37% | 2.73% ±0.45% | 242,960 | 22 / 22 |
 | Baseline LoRA (exp1) | 24.98% ±0.37% | 31.91% ±1.36% | 2.50% ±0.43% | 1.93 | 22 / 22 |
 | Stochastic Dropout (exp2) | 23.68% ±0.36% | 27.99% ±1.31% | 1.90% ±0.38% | 2.20 | 22 / 22 |
-| **Gumbel Router (exp6)** | **24.91% ±0.36%** | **32.25% ±1.37%** | **2.96% ±0.46%** | **54.21** | **13.25 / 22** |
+| **Gumbel Router (exp6)** | **24.91% ±0.36%** | **32.25% ±1.37%** | **2.96% ±0.46%** | **91.66** | **13.35 / 22** |
 | Token-Level Router (exp9) | — | — | — | — | 19.9 / 22 (collapsed) |
 | **Token-Level Router v2 (exp10)** | **25.13% ±0.37%** | 30.80% ±1.35% | **2.96% ±0.47%** | 197.48 | **6.69 / 22** |
 
@@ -233,14 +233,14 @@ The comparison against the Baseline LoRA model is more nuanced. DLR is within on
 
 ### 5.4 Perplexity Discrepancy
 
-The DLR model's WikiText-103 perplexity (54.21) is substantially higher than the static LoRA baselines (1.93–2.20). This is expected: the gated forward uses soft gates at evaluation (hard=False), meaning the residual bypass is partial rather than binary. The model was trained with hard gates; the soft-gate evaluation introduces a domain shift. A more accurate perplexity estimate would use hard=True at evaluation; this is deferred to the next experimental revision.
+The DLR models' WikiText-103 perplexity (91.66 for exp6, 197.48 for exp10) is substantially higher than the static LoRA baselines (1.93–2.20) when evaluated with strict binary routing (`hard=True`). This discrepancy highlights a fundamental trade-off of dynamic layer routing: while high-level semantic reasoning and factual recall (measured by MMLU, ARC, and GSM8K) are largely preserved even when skipping 40-70% of layers, fine-grained causal language modeling—which requires precise vocabulary probability distributions—is disproportionately degraded by the missing intermediate feature refinement. The KD objective successfully transfers task-solving capability, but exact token distribution matching requires all layers to be active. Future work must investigate distillation objectives that better preserve the exact token distribution without sacrificing compute efficiency.
 
 ---
 
 ## 6. Limitations and Future Work
 
 1. **~~Rescale and re-run exp8 Pareto sweep~~** — ✅ Completed. Turbo sweep with λ ∈ [0.1, 3.0] produced clear monotonic response.
-2. **Perplexity measurement fix** — evaluate DLR with hard gates (hard=True) at inference to get a fair perplexity comparison against static baselines.
+2. **~~Perplexity measurement fix~~** — ✅ Completed. Evaluated DLR with hard gates (`hard=True`) at inference. Perplexity remains high, indicating it is a fundamental trade-off of layer skipping rather than a soft-gate artifact.
 3. **~~Token-level routing~~** — ✅ Implemented (exp9 + exp10). exp9 demonstrated router collapse; exp10 addresses with per-layer penalty + target skip ratio.
 4. **~~Complete exp10 training and evaluation~~** — ✅ Completed. exp10 resolved the router collapse, achieving 6.69 active layers with superior MMLU and GSM8K performance compared to sequence-level routing.
 5. **Scale to larger models** — validate on Llama-3-8B or Mistral-7B with richer datasets (OpenOrca, C4).
