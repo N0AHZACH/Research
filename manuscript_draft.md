@@ -33,7 +33,7 @@ Our contributions are:
 Magnitude pruning and structured pruning reduce model size but yield a single static network. Once pruned, the compute graph is identical for all inputs — the same limitation as the un-pruned model, just cheaper.
 
 ### 2.2 Early Exiting
-Depth-adaptive transformers (Elbayad et al., 2020) and Confident Adaptive Language Modeling (Schuster et al., 2022) allow tokens to exit after any layer when a classifier head predicts sufficient confidence. This is strictly more general than static models, but imposes a *monotonic exit* constraint: once a token exits at layer k, layers k+1…L are never run. Dynamic Layer Routing removes this constraint — a sample may execute layers 1–4, skip layers 5–10, and then execute layers 11–22.
+Depth-adaptive transformers (Elbayad et al., 2020) and Confident Adaptive Language Modeling (Schuster et al., 2022) allow tokens to exit the network early when a layer-wise classifier head predicts sufficient confidence. While strictly more general than static routing, early exiting imposes a rigid *monotonic exit* constraint: once a token exits at layer $k$, it is irrevocably excluded from layers $k+1 \dots L$. This constraint fundamentally limits the model's capacity, as tokens cannot bypass irrelevant middle layers to leverage specialized upper layers. **Dynamic Layer Routing (DLR) strictly generalizes early exiting by removing the monotonicity constraint.** Under DLR, a token may execute layers 1–4, skip layers 5–10, and cleanly resume computation at layers 11–22. This enables non-contiguous compute graphs where representations can bypass intermediate refinement while still accessing the final projection layers.
 
 ### 2.3 Mixture of Experts
 MoE architectures (Shazeer et al., 2017; Fedus et al., 2022) route tokens to a subset of parallel feed-forward experts per layer, achieving input-conditioned compute within a layer. DLR operates orthogonally: it routes *across* layers rather than *within* a layer. The two approaches are complementary.
@@ -296,4 +296,4 @@ We presented Dynamic Layer Routing, a fully differentiable framework for input-c
 
 ---
 
-*Draft v0.4 — May 2026*
+*Draft v0.5 — May 2026*
