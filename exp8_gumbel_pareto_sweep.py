@@ -297,9 +297,7 @@ def train_one_penalty(penalty: float, teacher_model, base_model) -> dict:
             print(f"  [WARNING] Student compilation failed: {e}")
     elif os.name == "nt":
         print("  [INFO] Skipping student compilation (Windows/Triton limitation).")
-
-
-    # Fix: include router parameters in the optimizer (same fix as exp6 "Fix 6").
+        
     # Use filter to avoid passing the router parameters twice (which causes UserWarning)
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),

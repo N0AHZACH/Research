@@ -24,6 +24,7 @@ Usage:
 """
 
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import csv
 import json
 import math
@@ -47,7 +48,7 @@ parser.add_argument("--limit", type=int, default=None,
                     help="Limit number of samples per task (for fast debug runs)")
 parser.add_argument("--skip_baseline", action="store_true",
                     help="Skip evaluating baseline and stochastic variants")
-parser.add_argument("--batch_size", type=int, default=4,
+parser.add_argument("--batch_size", type=int, default=1,
                     help="Eval batch size per GPU")
 parser.add_argument(
     "--baseline_path",
@@ -164,7 +165,7 @@ def load_base_model(device="cuda"):
     """Load frozen TinyLlama as a reference (no LoRA)."""
     print(f"  Loading base TinyLlama from hub...")
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, device_map=device
+        MODEL_ID, torch_dtype=torch.bfloat16, device_map=device, attn_implementation="sdpa"
     )
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.pad_token = tokenizer.eos_token
@@ -186,7 +187,7 @@ def load_lora_checkpoint(checkpoint_path: Path, device="cuda"):
         )
     print(f"  Loading LoRA checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, device_map=device
+        MODEL_ID, torch_dtype=torch.bfloat16, device_map=device, attn_implementation="sdpa"
     )
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
     model = model.merge_and_unload()   # merge LoRA into base weights for standard eval
@@ -204,7 +205,7 @@ def load_gumbel_checkpoint(checkpoint_path: Path, device="cuda"):
     """
     print(f"  Loading Gumbel router checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, device_map=device
+        MODEL_ID, torch_dtype=torch.bfloat16, device_map=device, attn_implementation="sdpa"
     )
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
 
@@ -373,7 +374,16 @@ def run_lm_eval(model, tokenizer, tasks, num_fewshot, batch_size, limit=None):
     Wraps lm-eval's HFLM evaluator.
     Returns dict: {task_name: {"acc": float, "acc_stderr": float, ...}}
     """
-    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size)
+    # Silence the annoying token indices warning from transformers
+    tokenizer.model_max_length = 100000
+    
+    lm = HFLM(
+        pretrained=model, 
+        tokenizer=tokenizer, 
+        batch_size=batch_size,
+        max_length=4096,
+        truncation=True
+    )
     results = evaluator.simple_evaluate(
         model=lm,
         tasks=tasks,
@@ -628,7 +638,7 @@ def plot_per_layer_skip_rate(model, tokenizer, checkpoint_path, n_samples=200, d
 
     ds = raw.map(tok, batched=True, remove_columns=raw.column_names)
     ds.set_format("torch")
-    loader = DataLoader(ds, batch_size=4, shuffle=False)
+    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False)
 
     is_token_level = "token" in str(checkpoint_path).lower()
     per_layer_skip = torch.zeros(ROUTABLE)
