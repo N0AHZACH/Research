@@ -447,15 +447,31 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
     # Benchmark tasks via lm-eval
     if LM_EVAL_AVAILABLE and args.tasks:
         print(f"    Running lm-eval tasks: {args.tasks} ({args.num_fewshot}-shot) ...")
-        # For gumbel model, merge before passing to lm-eval
-        # (HFLM expects a standard HuggingFace model interface)
         if is_gumbel:
-            # For MMLU/GSM8K/ARC benchmark tasks, we merge the LoRA adapter and
-            # detach the router before passing to lm-eval. This isolates the quality
-            # of the *learned weights* from the routing policy, and ensures a standard
-            # HuggingFace model interface that lm-eval expects.
-            # Perplexity (above) is measured WITH the router active (hard=True).
-            eval_model = model.merge_and_unload()
+            # For MMLU/GSM8K/ARC benchmark tasks, we need a clean merged model
+            # for lm-eval (HFLM expects a standard HuggingFace model interface).
+            #
+            # CRITICAL: We must fully delete the old PeftModel + router and clear
+            # the GPU before reloading. On 8GB VRAM, merge_and_unload() on the
+            # existing model leaves fragmented GPU memory (old PeftModel tensors,
+            # router weights, hook residuals) that causes CUDA illegal memory
+            # access errors during autoregressive generation.
+            print(f"    Freeing GPU memory before lm-eval...")
+            del model
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            import gc; gc.collect()
+
+            # Reload a fresh copy and merge LoRA — clean GPU state
+            print(f"    Reloading fresh merged model for lm-eval...")
+            base = AutoModelForCausalLM.from_pretrained(
+                MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda", attn_implementation="sdpa"
+            )
+            peft_model = PeftModel.from_pretrained(base, str(checkpoint))
+            eval_model = peft_model.merge_and_unload()
+            del peft_model, base
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
         else:
             eval_model = model
 
@@ -469,9 +485,18 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
         for task, metrics in task_results.items():
             for metric, value in metrics.items():
                 result[f"{task}_{metric}"] = value
+
+        # Clean up the eval model
+        del eval_model
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
     else:
         if not LM_EVAL_AVAILABLE:
             result["lm_eval_note"] = "lm-eval not installed; perplexity only"
+        # Clean up the model if we're not passing it to lm-eval
+        del model
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
     print(f"\n  Results for [{name}]:")
     for k, v in result.items():
