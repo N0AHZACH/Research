@@ -28,6 +28,9 @@ The repository is structured as a progression of empirical studies, culminating 
 * **`exp10_token_routing_v2.py`**: **Our primary contribution.** Token-level routing stabilized with per-layer L1 penalties and quadratic target regularizers to prevent router collapse/over-skipping. 
 * **`exp9_ablation_no_kd.py`**: Ablation study verifying the necessity of the frozen teacher KD loss.
 
+### Phase 4: Scaling to Larger Models
+* **`exp11_large_model_routing.py`**: Scales the token-level DLR architecture to Llama-3.2-3B. Optimized to run on an 8GB VRAM consumer GPU using 4-bit QLoRA and gradient accumulation.
+
 ### Evaluation & Benchmarking
 * **`exp7_eval_harness.py`**: Integration with `lm-evaluation-harness` to run zero-shot benchmarks (MMLU, ARC-Challenge, GSM8K) and calculate WikiText-103 perplexity.
 * **`exp4_inference_benchmark.py`**: Physical hardware benchmarking script to measure actual wall-clock speedup (Tokens Per Second) and latency.
