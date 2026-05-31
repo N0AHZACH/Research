@@ -21,7 +21,7 @@ from tqdm import tqdm
 # ==============================================================================
 # Configuration
 # ==============================================================================
-MODEL_ID         = "meta-llama/Llama-3.2-3B"
+MODEL_ID         = "Qwen/Qwen2.5-3B"
 MAX_LENGTH       = 512
 TRAIN_SAMPLES    = 10000
 EVAL_SAMPLES     = 1000
@@ -52,21 +52,46 @@ LOG_EVERY_STEPS  = 20
 # ---------------------------------------------------------------------------
 def get_optimal_config():
     if not torch.cuda.is_available():
-        return 2, 8, 0, None
+        return 2, 8, 0, None, True, torch.float32
 
     vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    # RTX 4060 8GB
-    bs = 2
-    ga = 8
-    nw = 0  # 0 for RAMDataset on Windows (fastest)
-    attn = "sdpa" if vram_gb >= 7 else None
-    print(f"[HARDWARE MODE] Detected {vram_gb:.1f}GB VRAM. Using: BS={bs}, GA={ga}")
-    return bs, ga, nw, attn
+    # Determine best configuration based on VRAM
+    if vram_gb >= 70:  # A100 80GB, H100
+        bs = 8
+        ga = 2   # effective batch size 16
+        use_4bit = False
+        compute_dtype = torch.bfloat16
+    elif vram_gb >= 35: # A100 40GB, A6000 48GB
+        bs = 4
+        ga = 4   # effective batch size 16
+        use_4bit = False
+        compute_dtype = torch.bfloat16
+    elif vram_gb >= 22: # RTX 3090/4090 24GB, L4 24GB
+        bs = 2
+        ga = 8   # effective batch size 16
+        use_4bit = False
+        compute_dtype = torch.bfloat16
+    elif vram_gb >= 14: # T4 16GB, V100 16GB
+        bs = 2
+        ga = 8
+        use_4bit = True
+        compute_dtype = torch.bfloat16
+    else: # RTX 4060 8GB, etc.
+        bs = 1
+        ga = 16
+        use_4bit = True
+        compute_dtype = torch.bfloat16
 
-BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL = get_optimal_config()
+    # Linux-based GCP servers can utilize multiple workers for DataLoader
+    nw = 0 if os.name == 'nt' else 4
+    attn = "sdpa" if vram_gb >= 7 else None
+    print(f"[HARDWARE MODE] Detected {vram_gb:.1f}GB VRAM. Configured: BS={bs}, GA={ga}, 4-bit Quantization={use_4bit}, Precision={compute_dtype}")
+    return bs, ga, nw, attn, use_4bit, compute_dtype
+
+BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL, USE_4BIT, COMPUTE_DTYPE = get_optimal_config()
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CSV_FILENAME = f"exp11_llama3_token_routing_{TIMESTAMP}.csv"
@@ -225,11 +250,17 @@ def main():
     # Models: Student (LoRA) + Teacher (Frozen) for KD
     # ==============================================================================
     print(f"\nLoading {MODEL_ID} student (LoRA) ...")
-    q_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
-    base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=q_cfg, device_map="cuda", attn_implementation=ATTN_IMPL)
+    if USE_4BIT:
+        q_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=COMPUTE_DTYPE)
+        base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=q_cfg, device_map="cuda", attn_implementation=ATTN_IMPL)
+    else:
+        base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, device_map="cuda", attn_implementation=ATTN_IMPL)
 
     print("Loading frozen Teacher for KD ...")
-    teacher_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=q_cfg, device_map="cuda", attn_implementation=ATTN_IMPL)
+    if USE_4BIT:
+        teacher_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=q_cfg, device_map="cuda", attn_implementation=ATTN_IMPL)
+    else:
+        teacher_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, device_map="cuda", attn_implementation=ATTN_IMPL)
     for p in teacher_model.parameters():
         p.requires_grad = False
     teacher_model.eval()
