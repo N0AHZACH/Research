@@ -202,8 +202,8 @@ def main():
     # Dataset - Wikitext-103
     # ==============================================================================
     print("Loading dataset: wikitext-103-raw-v1 ...")
-    raw      = load_dataset("wikitext", "wikitext-103-raw-v1", split="train")
-    eval_raw = load_dataset("wikitext", "wikitext-103-raw-v1", split="validation")
+    raw      = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="train")
+    eval_raw = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="validation")
 
     raw      = raw.filter(lambda x: len(x["text"]) > 100).select(range(TRAIN_SAMPLES))
     eval_raw = eval_raw.filter(lambda x: len(x["text"]) > 100).select(range(EVAL_SAMPLES))
