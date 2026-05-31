@@ -1,11 +1,12 @@
 """
 exp11_large_model_routing.py - Phase 4: Scaling to Larger Models
 
-Validating the DLR framework on Llama-3.2-3B (or other 3B+ models).
-To fit within 8GB VRAM, we use a strict QLoRA configuration (4-bit base model)
-with smaller micro-batch sizes and higher gradient accumulation.
+Validating the DLR framework on Qwen2.5-3B.
+Auto-detects GPU hardware and configures batch size, quantization, and precision.
+Includes robust checkpointing and CUDA OOM recovery for cloud environments.
 """
 import csv
+import gc
 import os
 import itertools
 import datetime
@@ -44,8 +45,8 @@ KD_TEMPERATURE   = 2.0
 GATE_ENTROPY_BETA = 0.0   # Disabled: counteracts compute penalty
 KD_WARMUP_STEPS  = 50
 
-EVAL_EVERY_STEPS = 100
-LOG_EVERY_STEPS  = 20
+EVAL_EVERY_STEPS = 50   # Checkpoint frequently to avoid losing work
+LOG_EVERY_STEPS  = 10
 
 # ---------------------------------------------------------------------------
 # Hardware Auto-Optimisation
@@ -55,40 +56,32 @@ def get_optimal_config():
         return 2, 8, 0, None, True, torch.float32
 
     vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    gpu_name = torch.cuda.get_device_name(0)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
+    # T4 is Turing arch — no bfloat16 support, must use float16
+    is_turing = 'T4' in gpu_name or 'RTX 20' in gpu_name or 'Turing' in gpu_name
+
     # Determine best configuration based on VRAM
     if vram_gb >= 70:  # A100 80GB, H100
-        bs = 8
-        ga = 2   # effective batch size 16
-        use_4bit = False
-        compute_dtype = torch.bfloat16
+        bs, ga, use_4bit = 8, 2, False
     elif vram_gb >= 35: # A100 40GB, A6000 48GB
-        bs = 4
-        ga = 4   # effective batch size 16
-        use_4bit = False
-        compute_dtype = torch.bfloat16
+        bs, ga, use_4bit = 4, 4, False
     elif vram_gb >= 22: # RTX 3090/4090 24GB, L4 24GB
-        bs = 2
-        ga = 8   # effective batch size 16
-        use_4bit = False
-        compute_dtype = torch.bfloat16
+        bs, ga, use_4bit = 2, 8, False
     elif vram_gb >= 14: # T4 16GB, V100 16GB
-        bs = 2
-        ga = 8
-        use_4bit = True
-        compute_dtype = torch.bfloat16
+        bs, ga, use_4bit = 2, 8, True
     else: # RTX 4060 8GB, etc.
-        bs = 1
-        ga = 16
-        use_4bit = True
-        compute_dtype = torch.bfloat16
+        bs, ga, use_4bit = 1, 16, True
 
-    # Linux-based GCP servers can utilize multiple workers for DataLoader
-    nw = 0 if os.name == 'nt' else 4
+    compute_dtype = torch.float16 if is_turing else torch.bfloat16
+
+    # Limit workers based on available CPU cores (GCP T4 often has only 2 vCPUs)
+    cpu_count = os.cpu_count() or 2
+    nw = 0 if os.name == 'nt' else min(2, cpu_count - 1)
     attn = "sdpa" if vram_gb >= 7 else None
-    print(f"[HARDWARE MODE] Detected {vram_gb:.1f}GB VRAM. Configured: BS={bs}, GA={ga}, 4-bit Quantization={use_4bit}, Precision={compute_dtype}")
+    print(f"[HARDWARE] GPU: {gpu_name} | {vram_gb:.1f}GB VRAM | BS={bs}, GA={ga}, 4bit={use_4bit}, dtype={compute_dtype}, workers={nw}")
     return bs, ga, nw, attn, use_4bit, compute_dtype
 
 BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL, USE_4BIT, COMPUTE_DTYPE = get_optimal_config()
@@ -223,9 +216,10 @@ def main():
         out["labels"] = out["input_ids"].copy()
         return out
 
-    # Utilizing 12 cores for tokenization
-    train_enc = raw.map(tokenize, batched=True, remove_columns=raw.column_names, num_proc=12)
-    eval_enc  = eval_raw.map(tokenize, batched=True, remove_columns=eval_raw.column_names, num_proc=12)
+    # Use available CPU cores for tokenization (capped for low-core cloud VMs)
+    tok_procs = min(os.cpu_count() or 1, 2)
+    train_enc = raw.map(tokenize, batched=True, remove_columns=raw.column_names, num_proc=tok_procs)
+    eval_enc  = eval_raw.map(tokenize, batched=True, remove_columns=eval_raw.column_names, num_proc=tok_procs)
     train_enc.set_format("torch")
     eval_enc.set_format("torch")
 
@@ -242,8 +236,10 @@ def main():
                 "labels": self.labels[idx]
             }
 
-    train_loader = DataLoader(RAMDataset(train_enc), batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
-    eval_loader  = DataLoader(RAMDataset(eval_enc),  batch_size=BATCH_SIZE, shuffle=False, pin_memory=True)
+    # pin_memory=False to avoid excess system RAM usage on low-memory VMs
+    pin = torch.cuda.is_available() and (os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') / (1024**3) > 12 if hasattr(os, 'sysconf') else True)
+    train_loader = DataLoader(RAMDataset(train_enc), batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=pin)
+    eval_loader  = DataLoader(RAMDataset(eval_enc),  batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=pin)
     print(f"  Train: {len(train_enc)} | Eval: {len(eval_enc)}")
 
     # ==============================================================================
@@ -299,7 +295,7 @@ def main():
         if latest_dir:
             checkpoint_dir = os.path.join(latest_dir, "checkpoint_latest")
             save_dir = latest_dir
-            csv_filename = f"{latest_dir.replace('exp10_token_output_', 'exp10_token_routing_v2_')}.csv"
+            csv_filename = f"{latest_dir.replace('exp11_llama3_output_', 'exp11_llama3_token_routing_')}.csv"
     elif args.resume and args.resume.lower() != "none":
         checkpoint_dir = args.resume
         parent_dir = os.path.dirname(checkpoint_dir)
@@ -447,9 +443,9 @@ def main():
     # ==============================================================================
     # Training Loop
     # ==============================================================================
-    print(f"\nStarting Phase 2 v2 TOKEN-LEVEL Router training...")
+    print(f"\nStarting Phase 4: Scaled Token-Level Router training on {MODEL_ID}...")
     print(f"  COMPUTE_PENALTY={COMPUTE_PENALTY} | TARGET_SKIP={TARGET_SKIP} | TARGET_PENALTY={TARGET_PENALTY}")
-    print(f"  KD_ALPHA={KD_ALPHA} | Init bias=-3.0\n")
+    print(f"  KD_ALPHA={KD_ALPHA} | Init bias=-1.5\n")
 
     headers = ["Global Step", "Epoch", "Training Loss", "CE Loss", "KD Loss",
                "Gate Loss", "Target Loss", "Validation Loss", "Avg Active Layers",
@@ -461,6 +457,9 @@ def main():
         with open(csv_filename, "w", newline="") as f:
             csv.writer(f).writerow(headers)
 
+    oom_count = 0
+    MAX_OOM_RETRIES = 5
+
     try:
         for epoch in range(start_epoch, EPOCHS):
             model.train()
@@ -470,28 +469,41 @@ def main():
             for step, batch in enumerate(epoch_bar):
                 if step <= start_step:
                     continue
-                
+
                 batch = {k: v.to("cuda") for k, v in batch.items()}
-                
-                student_logits, ce_loss, gates = gated_forward(model, batch, temperature=current_temp, hard=True)
 
-                with torch.no_grad():
-                    teacher_logits = teacher_model(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch.get("attention_mask"),
-                    ).logits
+                # --- OOM-safe forward/backward ---
+                try:
+                    student_logits, ce_loss, gates = gated_forward(model, batch, temperature=current_temp, hard=True)
 
-                # Compute gate loss with per-layer penalty + target skip ratio
-                gate_loss, per_layer_activity = compute_gate_loss(gates)
+                    with torch.no_grad():
+                        teacher_logits = teacher_model(
+                            input_ids=batch["input_ids"],
+                            attention_mask=batch.get("attention_mask"),
+                        ).logits
 
-                if global_step < KD_WARMUP_STEPS:
-                    kd_loss    = torch.tensor(0.0, device="cuda")
-                    total_loss = (ce_loss + gate_loss) / GRAD_ACCUM
-                else:
-                    kd_loss    = compute_kd_loss(student_logits[:, :-1, :], teacher_logits[:, :-1, :], KD_TEMPERATURE)
-                    total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss) / GRAD_ACCUM
-                    
-                total_loss.backward()
+                    gate_loss, per_layer_activity = compute_gate_loss(gates)
+
+                    if global_step < KD_WARMUP_STEPS:
+                        kd_loss    = torch.tensor(0.0, device="cuda")
+                        total_loss = (ce_loss + gate_loss) / GRAD_ACCUM
+                    else:
+                        kd_loss    = compute_kd_loss(student_logits[:, :-1, :], teacher_logits[:, :-1, :], KD_TEMPERATURE)
+                        total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss) / GRAD_ACCUM
+
+                    total_loss.backward()
+
+                except torch.cuda.OutOfMemoryError:
+                    oom_count += 1
+                    print(f"\n[OOM] CUDA OOM on step {step} (occurrence {oom_count}/{MAX_OOM_RETRIES}). Clearing cache and skipping batch...")
+                    optimizer.zero_grad(set_to_none=True)
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    if oom_count >= MAX_OOM_RETRIES:
+                        print("[OOM] Too many OOM errors. Saving checkpoint and exiting.")
+                        save_checkpoint(epoch, step, global_step, best_val_loss, current_temp)
+                        return
+                    continue
 
                 if (step + 1) % GRAD_ACCUM == 0 or (step + 1) == len(train_loader):
                     torch.nn.utils.clip_grad_norm_(itertools.chain(model.parameters(), model.router.parameters()), 1.0)
@@ -503,7 +515,7 @@ def main():
                     if global_step % LOG_EVERY_STEPS == 0:
                         avg_layers = gates.detach().float().mean(dim=(0, 1)).sum().item() + ALWAYS_KEEP
                         skip_ratio = 1.0 - gates.detach().float().mean().item()
-                        
+
                         epoch_bar.set_postfix({
                             "loss": f"{total_loss.item() * GRAD_ACCUM:.4f}",
                             "ce": f"{ce_loss.item():.4f}",
@@ -543,12 +555,12 @@ def main():
 
                             with open(csv_filename, "a", newline="") as f:
                                 csv.writer(f).writerow([
-                                    global_step, epoch + 1, f"{total_loss.item() * GRAD_ACCUM:.4f}", 
+                                    global_step, epoch + 1, f"{total_loss.item() * GRAD_ACCUM:.4f}",
                                     f"{ce_loss.item():.4f}", f"{kd_loss.item():.4f}", f"{gate_loss.item():.4f}",
                                     f"{target_loss_val:.4f}",
                                     f"{val_loss:.4f}", f"{val_avg_layers:.1f}",
                                     f"{actual_skip:.4f}",
-                                    f"{current_temp:.4f}", 
+                                    f"{current_temp:.4f}",
                                     f"{scheduler.get_last_lr()[0]:.2e}"
                                 ])
 
@@ -567,6 +579,16 @@ def main():
         save_checkpoint(curr_epoch, curr_step, global_step, best_val_loss, current_temp)
         print("Checkpoint saved successfully. Exiting.")
         return
+    except Exception as e:
+        print(f"\n[ERROR] Unexpected error: {e}. Saving emergency checkpoint...")
+        try:
+            curr_step = step if 'step' in locals() else -1
+            curr_epoch = epoch if 'epoch' in locals() else start_epoch
+            save_checkpoint(curr_epoch, curr_step, global_step, best_val_loss, current_temp)
+            print("Emergency checkpoint saved.")
+        except Exception as save_err:
+            print(f"Failed to save emergency checkpoint: {save_err}")
+        raise
 
     print("\nSaving final model checkpoint...")
     os.makedirs(os.path.join(save_dir, "final_model"), exist_ok=True)
