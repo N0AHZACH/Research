@@ -333,6 +333,20 @@ def main():
                         if (step + 1) % 10 == 0:
                             pbar.set_postfix(metrics_log)
 
+                        # FREQUENT CHECKPOINTING (Every 50 optimizer steps = 50 * GRAD_ACCUM batches)
+                        if (step + 1) % (50 * GRAD_ACCUM) == 0:
+                            peft_state = {k: v.cpu() for k, v in model.state_dict().items() if "lora" in k}
+                            torch.save({
+                                "chunk_idx": chunk_idx,
+                                "epoch": epoch,
+                                "cur_temp": cur_temp,
+                                "model": peft_state,
+                                "routers": routers.state_dict(),
+                                "optimizers": {k: v.state_dict() for k, v in optimizers.items() if k.startswith("p_") and float(k.replace("p_", "").replace("_", ".")) in current_chunk},
+                                "schedulers": {k: v.state_dict() for k, v in schedulers.items() if k.startswith("p_") and float(k.replace("p_", "").replace("_", ".")) in current_chunk},
+                                "g_steps": g_steps,
+                            }, checkpoint_path)
+
                     except torch.cuda.OutOfMemoryError:
                         oom_count += 1
                         print(f"\n[OOM] CUDA OOM on step {step}. Clearing cache...")
@@ -340,6 +354,20 @@ def main():
                             optimizers[name].zero_grad(set_to_none=True)
                         gc.collect()
                         torch.cuda.empty_cache()
+                        
+                        # Emergency save on OOM
+                        peft_state = {k: v.cpu() for k, v in model.state_dict().items() if "lora" in k}
+                        torch.save({
+                            "chunk_idx": chunk_idx,
+                            "epoch": epoch,
+                            "cur_temp": cur_temp,
+                            "model": peft_state,
+                            "routers": routers.state_dict(),
+                            "optimizers": {k: v.state_dict() for k, v in optimizers.items() if k.startswith("p_") and float(k.replace("p_", "").replace("_", ".")) in current_chunk},
+                            "schedulers": {k: v.state_dict() for k, v in schedulers.items() if k.startswith("p_") and float(k.replace("p_", "").replace("_", ".")) in current_chunk},
+                            "g_steps": g_steps,
+                        }, checkpoint_path)
+                        
                         if oom_count >= 5:
                             print("[OOM] Too many OOM errors. Please reduce batch size or increase GPU VRAM.")
                             return
