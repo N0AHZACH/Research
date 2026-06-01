@@ -14,6 +14,8 @@ import os
 import csv
 import datetime
 import argparse
+import sys
+import signal
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -255,6 +257,34 @@ def main():
     cur_temp = GUMBEL_TEMP_START
     g_steps = {f"p_{str(p).replace('.', '_')}": 0 for p in PENALTIES}
     
+    # State dict for signal handler checkpointing
+    training_state = {
+        "chunk_idx": 0,
+        "epoch": 0,
+        "cur_temp": GUMBEL_TEMP_START
+    }
+    
+    def save_checkpoint(c_idx, ep, temp, label=""):
+        peft_state = {k: v.cpu() for k, v in model.state_dict().items() if "lora" in k}
+        torch.save({
+            "chunk_idx": c_idx,
+            "epoch": ep,
+            "cur_temp": temp,
+            "model": peft_state,
+            "routers": routers.state_dict(),
+            "optimizers": {k: v.state_dict() for k, v in optimizers.items() if k.startswith("p_") and float(k.replace("p_", "").replace("_", ".")) in penalty_chunks[c_idx]},
+            "schedulers": {k: v.state_dict() for k, v in schedulers.items() if k.startswith("p_") and float(k.replace("p_", "").replace("_", ".")) in penalty_chunks[c_idx]},
+            "g_steps": g_steps,
+        }, checkpoint_path)
+        print(f"[CHECKPOINT] Saved checkpoint {label} at Chunk {c_idx+1}, Epoch {ep+1}")
+
+    def sigterm_handler(signum, frame):
+        print("\n[SIGTERM/PREEMPTION] Preemption signal received! Saving emergency checkpoint...")
+        save_checkpoint(training_state["chunk_idx"], training_state["epoch"], training_state["cur_temp"], label="(Emergency)")
+        sys.exit(143) # Standard exit code for SIGTERM
+        
+    signal.signal(signal.SIGTERM, sigterm_handler)
+    
     if os.path.exists(checkpoint_path):
         print(f"\n[INFO] Found checkpoint at {checkpoint_path}. Loading...")
         chk = torch.load(checkpoint_path, map_location="cpu")
@@ -277,12 +307,15 @@ def main():
         current_chunk = penalty_chunks[chunk_idx]
         print(f"\n>>> Processing Chunk {chunk_idx+1}/{len(penalty_chunks)}: {current_chunk}")
         
+        training_state["chunk_idx"] = chunk_idx
         if chunk_idx > start_chunk_idx:
             start_epoch = 0
             cur_temp = GUMBEL_TEMP_START
+            training_state["cur_temp"] = cur_temp
             
         try:
             for epoch in range(start_epoch, EPOCHS):
+                training_state["epoch"] = epoch
                 model.train()
                 pbar = tqdm(train_loader, desc=f"Chunk {chunk_idx+1} | Ep {epoch+1}/{EPOCHS}")
                 
@@ -331,22 +364,11 @@ def main():
                         if (step + 1) % GRAD_ACCUM == 0:
                             torch.cuda.empty_cache()
                         
-                        if (step + 1) % 10 == 0:
-                            pbar.set_postfix(metrics_log)
+                            training_state["cur_temp"] = cur_temp
 
                         # FREQUENT CHECKPOINTING (Every 50 optimizer steps = 50 * GRAD_ACCUM batches)
                         if (step + 1) % (50 * GRAD_ACCUM) == 0:
-                            peft_state = {k: v.cpu() for k, v in model.state_dict().items() if "lora" in k}
-                            torch.save({
-                                "chunk_idx": chunk_idx,
-                                "epoch": epoch,
-                                "cur_temp": cur_temp,
-                                "model": peft_state,
-                                "routers": routers.state_dict(),
-                                "optimizers": {k: v.state_dict() for k, v in optimizers.items() if k.startswith("p_") and float(k.replace("p_", "").replace("_", ".")) in current_chunk},
-                                "schedulers": {k: v.state_dict() for k, v in schedulers.items() if k.startswith("p_") and float(k.replace("p_", "").replace("_", ".")) in current_chunk},
-                                "g_steps": g_steps,
-                            }, checkpoint_path)
+                            save_checkpoint(chunk_idx, epoch, cur_temp, label=f"(Step {step+1})")
 
                     except torch.cuda.OutOfMemoryError:
                         oom_count += 1
@@ -357,17 +379,7 @@ def main():
                         torch.cuda.empty_cache()
                         
                         # Emergency save on OOM
-                        peft_state = {k: v.cpu() for k, v in model.state_dict().items() if "lora" in k}
-                        torch.save({
-                            "chunk_idx": chunk_idx,
-                            "epoch": epoch,
-                            "cur_temp": cur_temp,
-                            "model": peft_state,
-                            "routers": routers.state_dict(),
-                            "optimizers": {k: v.state_dict() for k, v in optimizers.items() if k.startswith("p_") and float(k.replace("p_", "").replace("_", ".")) in current_chunk},
-                            "schedulers": {k: v.state_dict() for k, v in schedulers.items() if k.startswith("p_") and float(k.replace("p_", "").replace("_", ".")) in current_chunk},
-                            "g_steps": g_steps,
-                        }, checkpoint_path)
+                        save_checkpoint(chunk_idx, epoch, cur_temp, label="(OOM Emergency)")
                         
                         if oom_count >= 5:
                             print("[OOM] Too many OOM errors. Please reduce batch size or increase GPU VRAM.")
@@ -386,32 +398,11 @@ def main():
                     next_temp = cur_temp
 
                 if next_chunk_idx < len(penalty_chunks):
-                    peft_state = {k: v.cpu() for k, v in model.state_dict().items() if "lora" in k}
-                    torch.save({
-                        "chunk_idx": next_chunk_idx,
-                        "epoch": next_epoch,
-                        "cur_temp": next_temp,
-                        "model": peft_state,
-                        "routers": routers.state_dict(),
-                        "optimizers": {k: v.state_dict() for k, v in optimizers.items() if k.startswith("p_") and float(k.replace("p_", "").replace("_", ".")) in current_chunk},
-                        "schedulers": {k: v.state_dict() for k, v in schedulers.items() if k.startswith("p_") and float(k.replace("p_", "").replace("_", ".")) in current_chunk},
-                        "g_steps": g_steps,
-                    }, checkpoint_path)
-                    print(f"\n[INFO] Saved checkpoint to {checkpoint_path}")
+                    save_checkpoint(next_chunk_idx, next_epoch, next_temp, label="(Chunk Complete)")
 
         except KeyboardInterrupt:
             print("\n[INTERRUPT] Saving checkpoint...")
-            peft_state = {k: v.cpu() for k, v in model.state_dict().items() if "lora" in k}
-            torch.save({
-                "chunk_idx": chunk_idx,
-                "epoch": epoch,
-                "cur_temp": cur_temp,
-                "model": peft_state,
-                "routers": routers.state_dict(),
-                "optimizers": {k: v.state_dict() for k, v in optimizers.items() if k.startswith("p_") and float(k.replace("p_", "").replace("_", ".")) in current_chunk},
-                "schedulers": {k: v.state_dict() for k, v in schedulers.items() if k.startswith("p_") and float(k.replace("p_", "").replace("_", ".")) in current_chunk},
-                "g_steps": g_steps,
-            }, checkpoint_path)
+            save_checkpoint(chunk_idx, epoch, cur_temp, label="(Interrupt)")
             return
 
     print("\nRunning Evaluation...")
