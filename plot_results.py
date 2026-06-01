@@ -155,14 +155,59 @@ def main():
         plt.savefig('inference_speedup_bar.png', dpi=300, bbox_inches='tight')
 
     # Prefer exp8 (Gumbel Pareto sweep) over exp5 (old REINFORCE sweep)
-    # Prefer exp12 (3B model sweep) over exp8 (Gumbel Pareto sweep) over exp5 (old REINFORCE sweep)
+    # Prefer exp13 (OpenLLaMA 3B) and exp12 (Qwen 3B) sweeps
+    exp13_files = glob.glob("exp13_openllama_pareto_*.csv")
+    exp13_files = [f for f in exp13_files if os.path.getsize(f) > 100]
     exp12_files = glob.glob("exp12_large_model_pareto_*.csv")
     exp12_files = [f for f in exp12_files if os.path.getsize(f) > 100]
     exp8_files = glob.glob("exp8_gumbel_pareto_*.csv")
     exp8_files = [f for f in exp8_files if os.path.getsize(f) > 100]
     pareto_files = glob.glob("pareto_sweep_metrics_*.csv")
     
-    if exp12_files:
+    # -------------------------------------------------------------------------
+    # NEW: 3B Architecture Comparison Graph (Qwen vs OpenLLaMA Phase Transition)
+    # -------------------------------------------------------------------------
+    if exp12_files and exp13_files:
+        df_qwen = pd.read_csv(sorted(exp12_files, key=os.path.getmtime, reverse=True)[0])
+        df_llama = pd.read_csv(sorted(exp13_files, key=os.path.getmtime, reverse=True)[0])
+        
+        plt.figure(figsize=(12, 7))
+        plt.plot(df_qwen['Penalty'], df_qwen['Avg Active Layers'], 'o-', linewidth=3, markersize=10, color='#1f77b4', label='Qwen2.5-3B (36 Layers)')
+        plt.plot(df_llama['Penalty'], df_llama['Avg Active Layers'], 's-', linewidth=3, markersize=10, color='#ff7f0e', label='OpenLLaMA-3B (26 Layers)')
+        
+        plt.title('Phase Transition Comparison: DLR Scaling on 3B Architectures', fontsize=16, fontweight='bold', pad=15)
+        plt.xlabel('Compute Penalty', fontsize=14)
+        plt.ylabel('Average Active Layers', fontsize=14)
+        plt.xscale('log') # Log scale because penalties range from 10 to 500
+        plt.xticks([10, 25, 50, 100, 250, 500], ['10', '25', '50', '100', '250', '500'])
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.legend(fontsize=12, loc='upper right')
+        
+        # Add annotation for the Qwen sweet spot
+        plt.annotate('Qwen "Dam Break"', xy=(10.0, 14.4), xytext=(15, 20),
+                     arrowprops=dict(facecolor='black', shrink=0.05, width=1.5, headwidth=8),
+                     fontsize=12, fontweight='bold', color='#1f77b4')
+                     
+        # Add annotation for the OpenLLaMA immediate break
+        llama_layers = df_llama[df_llama['Penalty'] == 10.0]['Avg Active Layers'].values[0]
+        plt.annotate('OpenLLaMA Immediate Break', xy=(10.0, llama_layers), xytext=(15, llama_layers + 5),
+                     arrowprops=dict(facecolor='black', shrink=0.05, width=1.5, headwidth=8),
+                     fontsize=12, fontweight='bold', color='#ff7f0e')
+                     
+        plt.savefig('phase_transition_comparison.png', dpi=300, bbox_inches='tight')
+        print("  -> Generated phase_transition_comparison.png (Qwen vs OpenLLaMA)")
+        plt.close()
+
+    # Determine which file to use for the main Pareto dual-axis graph
+    if exp13_files:
+        pareto_file = sorted(exp13_files, key=os.path.getmtime, reverse=True)[0]
+        df_par = pd.read_csv(pareto_file)
+        if 'Penalty' in df_par.columns and 'Compute Penalty' not in df_par.columns:
+            df_par.rename(columns={'Penalty': 'Compute Penalty'}, inplace=True)
+        if 'Val Loss' in df_par.columns and 'Validation Loss' not in df_par.columns:
+            df_par.rename(columns={'Val Loss': 'Validation Loss'}, inplace=True)
+        print(f"  Using exp13 OpenLLaMA data for Pareto: {pareto_file}")
+    elif exp12_files:
         pareto_file = sorted(exp12_files, key=os.path.getmtime, reverse=True)[0]
         df_par = pd.read_csv(pareto_file)
         if 'Penalty' in df_par.columns and 'Compute Penalty' not in df_par.columns:
@@ -197,13 +242,13 @@ def main():
                          textcoords="offset points", xytext=(0,10), ha='center', fontsize=10, color='#2ca02c')
         
         # Plot Baseline Point (only if exp1 CSV was available)
-        baseline_layers = 36 if exp12_files else 22
+        baseline_layers = 26 if exp13_files else (36 if exp12_files else 22)
         if final_val1 is not None:
             plt.scatter(baseline_layers, final_val1, color='#1f77b4', s=150, zorder=5, label=f'Baseline ({baseline_layers} Layers)')
             plt.annotate("Baseline", (baseline_layers, final_val1), textcoords="offset points", xytext=(0,10), ha='center', fontsize=11, fontweight='bold', color='#1f77b4')
 
         # Plot Stochastic Point (only if exp2 CSV was available)
-        stoch_layers = 18 if exp12_files else 13
+        stoch_layers = 13 if exp13_files else (18 if exp12_files else 13)
         if final_val2 is not None:
             plt.scatter(stoch_layers, final_val2, color='#ff7f0e', s=150, zorder=5, label=f'Stochastic ({stoch_layers} Layers)')
             plt.annotate("Stochastic", (stoch_layers, final_val2), textcoords="offset points", xytext=(0,10), ha='center', fontsize=11, fontweight='bold', color='#ff7f0e')
