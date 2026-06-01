@@ -38,7 +38,7 @@ PENALTIES    = [10.0, 25.0, 50.0, 100.0, 250.0, 500.0]
 
 TRAIN_SAMPLES    = 10_000
 EVAL_SAMPLES     = 1_000
-EPOCHS           = 3
+EPOCHS           = 2
 MAX_EVAL_BATCHES = 100
 
 LR               = 3e-5
@@ -244,8 +244,10 @@ def main():
         optimizers[name] = torch.optim.AdamW(all_params, lr=LR, weight_decay=WEIGHT_DECAY)
         schedulers[name] = torch.optim.lr_scheduler.CosineAnnealingLR(optimizers[name], T_max=EPOCHS * len(train_loader) // GRAD_ACCUM)
 
-    # 3B model is very large. We use CHUNK_SIZE=2 so we don't blow up VRAM keeping too many optimizer states active at once.
-    CHUNK_SIZE = 2 
+    # 3B model is very large, but the L4 GPU has 24GB of VRAM. 
+    # Since PEFT adapters and optimizer states are tiny (~45MB each), we can fit ALL 6 penalties 
+    # into a single chunk. This means we process the entire sweep in ONE pass instead of three!
+    CHUNK_SIZE = 6
     penalty_chunks = [PENALTIES[i:i + CHUNK_SIZE] for i in range(0, len(PENALTIES), CHUNK_SIZE)]
     
     checkpoint_path = "exp12_large_model_pareto_ckpt.pt"
