@@ -71,7 +71,7 @@ def get_optimal_config():
     elif vram_gb >= 35: # A100 40GB
         bs, ga, use_4bit = 4, 4, False
     elif vram_gb >= 21: # L4 24GB (GCP often reports ~22GB available)
-        bs, ga, use_4bit = 2, 8, False
+        bs, ga, use_4bit = 4, 4, False
     elif vram_gb >= 14: # T4 16GB
         bs, ga, use_4bit = 2, 8, True
     else:
