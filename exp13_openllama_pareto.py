@@ -38,7 +38,7 @@ PENALTIES    = [10.0, 25.0, 50.0, 100.0, 250.0, 500.0]
 
 TRAIN_SAMPLES    = 10_000
 EVAL_SAMPLES     = 1_000
-EPOCHS           = 1
+EPOCHS           = 2
 MAX_EVAL_BATCHES = 100
 
 LR               = 3e-5
