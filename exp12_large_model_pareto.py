@@ -33,12 +33,12 @@ MODEL_ID     = "Qwen/Qwen2.5-3B"
 MAX_LENGTH   = 512
 ALWAYS_KEEP  = 4
 
-# Micro-Sweep to save cloud costs!
-PENALTIES    = [10.0, 50.0, 100.0, 250.0]
+# Publication-Grade Sweep (Rigorous Convergence)
+PENALTIES    = [10.0, 25.0, 50.0, 100.0, 250.0, 500.0]
 
-TRAIN_SAMPLES    = 2_500
-EVAL_SAMPLES     = 500
-EPOCHS           = 1
+TRAIN_SAMPLES    = 10_000
+EVAL_SAMPLES     = 1_000
+EPOCHS           = 2
 MAX_EVAL_BATCHES = 100
 
 LR               = 3e-5
@@ -244,10 +244,9 @@ def main():
         optimizers[name] = torch.optim.AdamW(all_params, lr=LR, weight_decay=WEIGHT_DECAY)
         schedulers[name] = torch.optim.lr_scheduler.CosineAnnealingLR(optimizers[name], T_max=EPOCHS * len(train_loader) // GRAD_ACCUM)
 
-    # 3B model is very large, but the L4 GPU has 24GB of VRAM. 
-    # Since PEFT adapters and optimizer states are tiny (~45MB each), we can fit ALL 6 penalties 
-    # Reduced to 4 penalties to save time.
-    CHUNK_SIZE = 4
+    # For publication rigor, we sweep all 6 penalties.
+    # The L4's 24GB VRAM allows us to fit all 6 into a single chunk.
+    CHUNK_SIZE = 6
     penalty_chunks = [PENALTIES[i:i + CHUNK_SIZE] for i in range(0, len(PENALTIES), CHUNK_SIZE)]
     
     checkpoint_path = "exp12_large_model_pareto_ckpt.pt"
