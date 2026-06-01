@@ -8,7 +8,7 @@ echo "=== DLR Research: GCP T4 Setup ==="
 
 # 1. Install pip dependencies
 pip3 install --upgrade pip --break-system-packages
-pip3 install torch transformers peft datasets accelerate bitsandbytes lm-eval matplotlib pandas tqdm safetensors --break-system-packages
+pip3 install torch transformers peft datasets accelerate bitsandbytes lm-eval matplotlib pandas tqdm safetensors sentencepiece tiktoken --break-system-packages
 
 # 2. Verify GPU is visible
 echo ""
