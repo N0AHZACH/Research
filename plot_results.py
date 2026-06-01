@@ -11,7 +11,7 @@ def get_latest_csv(prefix):
         files = glob.glob(f"{prefix}_*.csv")
     elif "exp7_eval" in prefix:
         files = glob.glob(f"{prefix}_*.csv")
-    elif "exp10_token_routing" in prefix or "exp9_token_level_routing" in prefix:
+    elif "exp11" in prefix or "exp10" in prefix or "exp9" in prefix:
         files = glob.glob(f"{prefix}_*.csv")
     else:
         files = glob.glob(f"{prefix}_metrics_*.csv")
@@ -316,18 +316,25 @@ def main():
         # Pull eval rows from each Phase 1 experiment
         val6 = df6.dropna(subset=["Validation Loss"]).copy()
 
-        # Load token-level routing data (prefer exp10 over exp9)
+        # Load token-level routing data (prefer exp11 over exp10/9)
+        exp11_file = get_latest_csv("exp11_llama3")
         exp10_file = get_latest_csv("exp10_token_routing_v2")
         exp9_file  = None
-        if not exp10_file:
+        if not exp11_file and not exp10_file:
             # Fallback to exp9 CSVs
             exp9_files = glob.glob("exp9_token_level_routing_*.csv")
             exp9_files = [f for f in exp9_files if os.path.getsize(f) > 200]
             if exp9_files:
                 exp9_files.sort(key=os.path.getmtime, reverse=True)
                 exp9_file = exp9_files[0]
-        token_file = exp10_file or exp9_file
-        token_label = "Token-Level Router (exp10)" if exp10_file else "Token-Level Router (exp9)"
+        
+        token_file = exp11_file or exp10_file or exp9_file
+        if exp11_file:
+            token_label = "Token-Level Router (exp11 3B)"
+        elif exp10_file:
+            token_label = "Token-Level Router (exp10)"
+        else:
+            token_label = "Token-Level Router (exp9)"
 
         if not val6.empty:
             plt.figure(figsize=(12, 6))
@@ -383,7 +390,12 @@ def main():
                     label="KD Loss", color="#ff7f0e", linewidth=2)
             ax.plot(df_tok["Global Step"], df_tok["Gate Loss"].ewm(alpha=0.2).mean(),
                     label="Gate Sparsity Loss", color="#2ca02c", linewidth=2)
-            tok_title = "exp10" if exp10_file else "exp9"
+            if exp11_file:
+                tok_title = "exp11"
+            elif exp10_file:
+                tok_title = "exp10"
+            else:
+                tok_title = "exp9"
             ax.set_title(f"{tok_title}: Token-Level Router Loss Breakdown",
                          fontsize=16, fontweight="bold", pad=15)
             ax.set_xlabel("Global Step", fontsize=14)
