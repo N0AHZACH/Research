@@ -45,7 +45,7 @@ KD_TEMPERATURE   = 2.0
 GATE_ENTROPY_BETA = 0.0   # Disabled: counteracts compute penalty
 KD_WARMUP_STEPS  = 50
 
-EVAL_EVERY_STEPS = 150   # Reduced frequency (was 50) to save massive evaluation time
+EVAL_EVERY_STEPS = 250   # Reduced frequency (was 150) to save massive evaluation time
 LOG_EVERY_STEPS  = 10
 
 # ---------------------------------------------------------------------------
