@@ -45,7 +45,7 @@ KD_TEMPERATURE   = 2.0
 GATE_ENTROPY_BETA = 0.0   # Disabled: counteracts compute penalty
 KD_WARMUP_STEPS  = 50
 
-EVAL_EVERY_STEPS = 50   # Checkpoint frequently to avoid losing work
+EVAL_EVERY_STEPS = 150   # Reduced frequency (was 50) to save massive evaluation time
 LOG_EVERY_STEPS  = 10
 
 # ---------------------------------------------------------------------------
@@ -463,7 +463,7 @@ def main():
     try:
         for epoch in range(start_epoch, EPOCHS):
             model.train()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             epoch_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
 
             for step, batch in enumerate(epoch_bar):
@@ -476,19 +476,19 @@ def main():
                 try:
                     student_logits, ce_loss, gates = gated_forward(model, batch, temperature=current_temp, hard=True)
 
-                    with torch.no_grad():
-                        with model.disable_adapter():
-                            teacher_logits = model(
-                                input_ids=batch["input_ids"],
-                                attention_mask=batch.get("attention_mask"),
-                            ).logits
-
                     gate_loss, per_layer_activity = compute_gate_loss(gates)
 
                     if global_step < KD_WARMUP_STEPS:
                         kd_loss    = torch.tensor(0.0, device="cuda")
                         total_loss = (ce_loss + gate_loss) / GRAD_ACCUM
                     else:
+                        # Only compute teacher forward pass when we actually need it for KD loss
+                        with torch.no_grad():
+                            with model.disable_adapter():
+                                teacher_logits = model(
+                                    input_ids=batch["input_ids"],
+                                    attention_mask=batch.get("attention_mask"),
+                                ).logits
                         kd_loss    = compute_kd_loss(student_logits[:, :-1, :], teacher_logits[:, :-1, :], KD_TEMPERATURE)
                         total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss) / GRAD_ACCUM
 
@@ -510,7 +510,7 @@ def main():
                     torch.nn.utils.clip_grad_norm_(itertools.chain(model.parameters(), model.router.parameters()), 1.0)
                     optimizer.step()
                     scheduler.step()
-                    optimizer.zero_grad()
+                    optimizer.zero_grad(set_to_none=True)
                     global_step += 1
 
                     if global_step % LOG_EVERY_STEPS == 0:
