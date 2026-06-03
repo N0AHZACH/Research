@@ -388,8 +388,10 @@ def main():
         gates = model.router(h_seq, temperature=temperature, hard=hard)   # [B, S, L]
 
         ctx.install_gate_hooks(all_layers[ALWAYS_KEEP:], gates)
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        ctx.remove_hooks()
+        try:
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        finally:
+            ctx.remove_hooks()
 
         return outputs.logits, outputs.loss, gates
 
