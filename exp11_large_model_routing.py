@@ -259,14 +259,8 @@ def main():
     else:
         base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, device_map="cuda", attn_implementation=ATTN_IMPL)
 
-    print("Loading frozen Teacher for KD ...")
-    if USE_4BIT:
-        teacher_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=q_cfg, device_map="cuda", attn_implementation=ATTN_IMPL)
-    else:
-        teacher_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, device_map="cuda", attn_implementation=ATTN_IMPL)
-    for p in teacher_model.parameters():
-        p.requires_grad = False
-    teacher_model.eval()
+    # We no longer load a separate teacher model to save 6GB VRAM.
+    # Instead, we will use model.disable_adapter() during the forward pass!
 
     lora_cfg = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -484,10 +478,11 @@ def main():
                     student_logits, ce_loss, gates = gated_forward(model, batch, temperature=current_temp, hard=True)
 
                     with torch.no_grad():
-                        teacher_logits = teacher_model(
-                            input_ids=batch["input_ids"],
-                            attention_mask=batch.get("attention_mask"),
-                        ).logits
+                        with model.disable_adapter():
+                            teacher_logits = model(
+                                input_ids=batch["input_ids"],
+                                attention_mask=batch.get("attention_mask"),
+                            ).logits
 
                     gate_loss, per_layer_activity = compute_gate_loss(gates)
 
