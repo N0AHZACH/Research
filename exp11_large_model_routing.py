@@ -35,12 +35,12 @@ LR               = 3e-5
 WEIGHT_DECAY     = 0.01
 
 ALWAYS_KEEP      = 4
-COMPUTE_PENALTY  = 5.0    # Balanced: between exp9 (2.0=collapsed) and prior exp10 (10.0=stuck)
+COMPUTE_PENALTY  = 0.02   # Drastically reduced to match ~2.0 scale of CE/KD loss (0.02 * 32 layers = 0.64 gate loss)
 TARGET_SKIP      = 0.40   # Target: ~60% active layers (~13.2 / 22)
-TARGET_PENALTY   = 8.0    # Stronger attractor toward target skip ratio
+TARGET_PENALTY   = 0.5    # Reduced attractor to match new loss scale
 GUMBEL_TEMP      = 1.0
 TEMP_ANNEAL_RATE = 0.95
-KD_ALPHA         = 0.3    # Reduced: give more weight to KD, less to raw CE
+KD_ALPHA         = 0.3    # Give more weight to KD, less to raw CE
 KD_TEMPERATURE   = 2.0
 GATE_ENTROPY_BETA = 0.0   # Disabled: counteracts compute penalty
 KD_WARMUP_STEPS  = 50
@@ -396,11 +396,15 @@ def main():
         return outputs.logits, outputs.loss, gates
 
     def compute_kd_loss(s_logits, t_logits, T):
-        return F.kl_div(
+        # kl_div with batchmean only divides by batch size.
+        # We must also divide by the sequence length so it is on the same scale as CE Loss.
+        seq_len = s_logits.size(1)
+        kl = F.kl_div(
             F.log_softmax(s_logits / T, dim=-1),
             F.softmax(t_logits  / T, dim=-1),
             reduction="batchmean",
         ) * (T ** 2)
+        return kl / seq_len
 
     def compute_gate_loss(gates):
         """
