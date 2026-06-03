@@ -193,7 +193,12 @@ def main():
 
     def tokenize_fn(b):
         o = tokenizer(b["text"], truncation=True, padding="max_length", max_length=MAX_LENGTH)
-        o["labels"] = o["input_ids"].copy()
+        labels = [list(ids) for ids in o["input_ids"]]
+        for i, mask in enumerate(o["attention_mask"]):
+            for j, m in enumerate(mask):
+                if m == 0:
+                    labels[i][j] = -100
+        o["labels"] = labels
         return o
 
     tok_procs = min(os.cpu_count() or 1, 2)

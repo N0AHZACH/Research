@@ -30,6 +30,8 @@ import json
 import math
 import argparse
 import datetime
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 import torch.nn.functional as F
 from pathlib import Path
@@ -318,7 +320,13 @@ def eval_perplexity(model, tokenizer, is_gumbel: bool, is_token_level: bool = Fa
 
     def tokenize(batch):
         out = tokenizer(batch["text"], truncation=True, padding="max_length", max_length=MAX_LENGTH)
-        out["labels"] = out["input_ids"].copy()
+        # Mask padding tokens in labels so CE loss ignores them
+        labels = [list(ids) for ids in out["input_ids"]]
+        for i, mask in enumerate(out["attention_mask"]):
+            for j, m in enumerate(mask):
+                if m == 0:
+                    labels[i][j] = -100
+        out["labels"] = labels
         return out
 
     ds = raw.map(tokenize, batched=True, remove_columns=raw.column_names)
@@ -381,7 +389,7 @@ def run_lm_eval(model, tokenizer, tasks, num_fewshot, batch_size, limit=None):
         pretrained=model, 
         tokenizer=tokenizer, 
         batch_size=batch_size,
-        max_length=4096,
+        max_length=2048,
         truncation=True
     )
     results = evaluator.simple_evaluate(
@@ -428,6 +436,7 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
         print(f"  [FALLBACK] Could not load checkpoint ({e}).")
         print(f"             Using pretrained base TinyLlama as proxy for '{name}'.")
         use_base_fallback = True
+        is_gumbel = False
         model, tokenizer = load_base_model()
 
     is_token_level = "token" in str(checkpoint).lower() if checkpoint else False
@@ -488,6 +497,8 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
 
         # Clean up the eval model
         del eval_model
+        if not is_gumbel and 'model' in locals():
+            del model
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
     else:
@@ -658,7 +669,13 @@ def plot_per_layer_skip_rate(model, tokenizer, checkpoint_path, n_samples=200, d
 
     def tok(batch):
         out = tokenizer(batch["text"], truncation=True, padding="max_length", max_length=512)
-        out["labels"] = out["input_ids"].copy()
+        # Mask padding tokens in labels so CE loss ignores them
+        labels = [list(ids) for ids in out["input_ids"]]
+        for i, mask in enumerate(out["attention_mask"]):
+            for j, m in enumerate(mask):
+                if m == 0:
+                    labels[i][j] = -100
+        out["labels"] = labels
         return out
 
     ds = raw.map(tok, batched=True, remove_columns=raw.column_names)

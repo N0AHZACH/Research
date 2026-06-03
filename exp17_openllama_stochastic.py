@@ -78,8 +78,10 @@ def main():
     class RAMDataset(torch.utils.data.Dataset):
         def __init__(self, enc):
             import torch
-            self.input_ids = torch.as_tensor(enc["input_ids"])
-            self.attention_mask = torch.as_tensor(enc["attention_mask"])
+            ids = enc["input_ids"]
+            mask = enc["attention_mask"]
+            self.input_ids = ids if isinstance(ids, torch.Tensor) else torch.stack(list(ids))
+            self.attention_mask = mask if isinstance(mask, torch.Tensor) else torch.stack(list(mask))
             self.labels = self.input_ids.clone()
             self.labels[self.attention_mask == 0] = -100
         def __len__(self): return len(self.input_ids)
@@ -105,7 +107,8 @@ def main():
     def stochastic_hook(module, input, output):
         # Drop ~50% of the time
         if model.training and random.random() < 0.50:
-            return input[0]
+            residual = input[0]
+            return (residual,) + output[1:] if isinstance(output, tuple) else residual
         return output
 
     handles = []

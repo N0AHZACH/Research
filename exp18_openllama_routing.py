@@ -1,7 +1,7 @@
 """
 exp11_large_model_routing.py - Phase 4: Scaling to Larger Models
 
-Validating the DLR framework on Qwen2.5-3B.
+Validating the DLR framework on OpenLLaMA-3B.
 Auto-detects GPU hardware and configures batch size, quantization, and precision.
 Includes robust checkpointing and CUDA OOM recovery for cloud environments.
 """

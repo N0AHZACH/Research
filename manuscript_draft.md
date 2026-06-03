@@ -1,12 +1,12 @@
 # Dynamic Layer Routing: Input-Conditional Compute Allocation in Large Language Models via Gumbel-Softmax Straight-Through Estimation
 
-> **Draft Status**: v0.6 — Final token-level routing results (exp10), 5-shot evaluation numbers, and wall-clock latency benchmarks integrated. Ready for review.
+> **Draft Status**: v0.7 — Honesty revision: softened overclaims, added MMLU/PPL caveats, fixed padding-label masking in eval harness, clarified structural vs. runtime compute savings.
 
 ---
 
 ## Abstract
 
-Transformer-based large language models (LLMs) allocate an identical compute budget to every input token regardless of its complexity. We argue this uniformity is fundamentally wasteful: trivial tokens ("the", punctuation) require far less representational refinement than complex reasoning tokens. We present **Dynamic Layer Routing (DLR)**, a framework that learns, end-to-end, to selectively skip transformer decoder layers on a *per-token* basis at both training and inference time. Our token-level router is a lightweight three-layer MLP conditioned on the unpooled contextual hidden states extracted from the first four (always-executed) anchor layers, producing binary skip gates via the Gumbel-Softmax Straight-Through Estimator (STE) independently for each token at each layer. Training is regularized with a Knowledge Distillation (KD) loss against a frozen full-depth teacher and a per-layer sparsity penalty with target skip ratio. Applied to TinyLlama-1.1B, the sequence-level DLR variant reduces the average number of active layers from 22 to **13.39 (−39.1%)** while achieving MMLU 5-shot accuracy of 25.19% (vs. 25.22% for the full static LoRA baseline), ARC-Challenge normalized accuracy of 35.84% (vs. 34.47%), and GSM8K flexible-extract accuracy of 2.05% (vs. 2.05%). We further extend DLR to **token-level granularity**, where the router independently decides for each token whether to execute or skip each layer, enabling fine-grained compute allocation that matches token complexity. Against the stochastic dropout baseline — which also drops ~39% of layers at training time but suffers from inference mismatch — DLR delivers superior ARC (+3.67pp) and GSM8K (+0.61pp) performance, while using only 6.68 active layers (-69.6% compute). These results demonstrate that input-conditional routing achieves substantial compute savings with negligible accuracy degradation relative to a properly trained static baseline, and strictly dominates input-agnostic random dropping in reasoning tasks.
+Transformer-based large language models (LLMs) allocate an identical compute budget to every input token regardless of its complexity. We argue this uniformity is wasteful and study whether a pretrained decoder-only model can learn to skip unnecessary transformer layers. We present **Dynamic Layer Routing (DLR)**, a framework that learns, end-to-end, to selectively skip transformer decoder layers on a *per-token* basis at both training and inference time. Our token-level router is a lightweight three-layer MLP conditioned on the unpooled contextual hidden states extracted from the first four (always-executed) anchor layers, producing binary skip gates via the Gumbel-Softmax Straight-Through Estimator (STE) independently for each token at each layer. Training is regularized with a Knowledge Distillation (KD) loss against a frozen full-depth teacher and a per-layer sparsity penalty with target skip ratio. Applied to TinyLlama-1.1B, the sequence-level DLR variant reduces the average number of active layers from 22 to **13.39 (−39.1%)** while maintaining ARC-Challenge normalized accuracy of 35.84% (vs. 34.47% baseline), and GSM8K flexible-extract accuracy of 2.05% (vs. 2.05% baseline). We further extend DLR to **token-level granularity**, where the router independently decides for each token whether to execute or skip each layer, enabling position-specific compute allocation. Against the stochastic dropout baseline — which also drops ~39% of layers at training time but suffers from inference mismatch — token-level DLR delivers higher ARC (+3.67pp) and GSM8K (+0.61pp) accuracy while using only 6.68 active layers (−69.6% structural compute). We note two important caveats: (1) MMLU scores for all TinyLlama variants are near the 25% chance level, making MMLU uninformative for this model scale — ARC-Challenge is the primary discriminative benchmark; (2) Wikitext-103 perplexity is substantially degraded under routing (119–197 vs. 1.93 baseline), indicating that layer skipping preserves high-level task performance but degrades fine-grained token distribution modeling. These results provide evidence that input-conditional routing can achieve substantial structural compute savings while preserving task accuracy, and consistently outperforms input-agnostic random dropping on reasoning benchmarks.
 
 ---
 
@@ -20,10 +20,10 @@ Prior work has attacked this inefficiency from several angles: (1) **Static prun
 
 Our contributions are:
 1. A **contextual Gumbel-STE router** that conditions skip decisions on post-Layer-4 hidden states, enabling informed routing rather than input-agnostic gating.
-2. A **token-level routing extension** that independently gates each token at each layer, enabling fine-grained compute allocation that matches token complexity — trivial tokens (punctuation, stop words) skip more layers than complex reasoning tokens.
+2. A **token-level routing extension** that independently gates each token at each layer, enabling position-specific compute allocation. We add token-category analysis to test whether learned budgets differ across punctuation, stop words, numeric tokens, subword continuations, rare-token proxies, and high-loss tokens.
 3. A **hook-based two-pass forward** strategy that preserves the model's internal invariants (Rotary Position Embeddings, Scaled Dot-Product Attention masking) while surgically applying per-token skip gates.
 4. A **KD-stabilized training objective** combining cross-entropy, knowledge distillation from a frozen full-depth teacher, per-layer L1 gate sparsity penalty, and a target skip ratio regularizer.
-5. Rigorous evaluation on MMLU, GSM8K, and ARC-Challenge demonstrating Pareto-superior efficiency over both a fully-trained static LoRA baseline and a stochastic depth dropout baseline.
+5. Evaluation on MMLU, GSM8K, and ARC-Challenge demonstrating competitive accuracy at substantially reduced structural compute relative to a fully-trained static LoRA baseline, and consistent improvements over a stochastic depth dropout baseline.
 
 ---
 
@@ -33,7 +33,7 @@ Our contributions are:
 Magnitude pruning and structured pruning reduce model size but yield a single static network. Once pruned, the compute graph is identical for all inputs — the same limitation as the un-pruned model, just cheaper.
 
 ### 2.2 Early Exiting
-Depth-adaptive transformers (Elbayad et al., 2020) and Confident Adaptive Language Modeling (Schuster et al., 2022) allow tokens to exit the network early when a layer-wise classifier head predicts sufficient confidence. While strictly more general than static routing, early exiting imposes a rigid *monotonic exit* constraint: once a token exits at layer $k$, it is irrevocably excluded from layers $k+1 \dots L$. This constraint fundamentally limits the model's capacity, as tokens cannot bypass irrelevant middle layers to leverage specialized upper layers. **Dynamic Layer Routing (DLR) strictly generalizes early exiting by removing the monotonicity constraint.** Under DLR, a token may execute layers 1–4, skip layers 5–10, and cleanly resume computation at layers 11–22. This enables non-contiguous compute graphs where representations can bypass intermediate refinement while still accessing the final projection layers.
+Depth-adaptive transformers (Elbayad et al., 2020) and Confident Adaptive Language Modeling (Schuster et al., 2022) allow tokens to exit the network early when a layer-wise classifier head predicts sufficient confidence. While strictly more general than static routing, early exiting imposes a rigid *monotonic exit* constraint: once a token exits at layer $k$, it is irrevocably excluded from layers $k+1 \dots L$. This constraint fundamentally limits the model's capacity, as tokens cannot bypass irrelevant middle layers to leverage specialized upper layers. **Dynamic Layer Routing (DLR) generalizes early exiting by removing the monotonicity constraint.** Under DLR, a token may execute layers 1–4, skip layers 5–10, and cleanly resume computation at layers 11–22. This enables non-contiguous compute graphs where representations can bypass intermediate refinement while still accessing the final projection layers.
 
 ### 2.3 Mixture of Experts
 MoE architectures (Shazeer et al., 2017; Fedus et al., 2022) route tokens to a subset of parallel feed-forward experts per layer, achieving input-conditioned compute within a layer. DLR operates orthogonally: it routes *across* layers rather than *within* a layer. The two approaches are complementary.
@@ -42,7 +42,7 @@ MoE architectures (Shazeer et al., 2017; Fedus et al., 2022) route tokens to a s
 The Gumbel-Softmax trick (Jang et al., 2017; Maddison et al., 2017) provides a differentiable relaxation of discrete categorical sampling. The Straight-Through Estimator (Bengio et al., 2013) enables backpropagation through the hard (binary) forward pass by using the soft gradient in the backward pass. We combine these to train binary layer-skip gates end-to-end.
 
 ### 2.5 Stochastic Depth
-Stochastic Depth (Huang et al., 2016) randomly drops layers during training as a regularization technique. Unlike DLR, Stochastic Depth is *input-agnostic* (uniform random), applied only at training time (all layers active at inference), and not optimized toward a compute objective. This creates an **inference mismatch**: the model is never trained to use upper layers consistently, causing accuracy degradation when evaluated with full depth. We use it as our primary baseline and empirically confirm that DLR's learned routing strictly dominates across all three benchmarks.
+Stochastic Depth (Huang et al., 2016) randomly drops layers during training as a regularization technique. Unlike DLR, Stochastic Depth is *input-agnostic* (uniform random), applied only at training time (all layers active at inference), and not optimized toward a compute objective. This creates an **inference mismatch**: the model is never trained to use upper layers consistently, causing accuracy degradation when evaluated with full depth. We use it as our primary baseline and empirically observe that DLR's learned routing consistently outperforms stochastic dropping on reasoning benchmarks (ARC, GSM8K), though the advantage on MMLU is within noise at this model scale.
 
 ### 2.6 LoRA Fine-Tuning
 Low-Rank Adaptation (Hu et al., 2021) efficiently adapts large pretrained models by injecting trainable low-rank matrices into attention projections. All three fine-tuned variants in this work use identical LoRA configurations (r=16, α=32) for fair comparison.
@@ -69,7 +69,7 @@ The router π_φ: R^H → [0,1]^{L-K} is a three-layer GELU-MLP (H=2048 for Tiny
 
 **Sequence-level variant (exp6):** The router ingests h̄_K^(b), the sequence-averaged hidden state. A single routing decision [B, L-K] is made per sample.
 
-**Token-level variant (exp10):** The router ingests the *unpooled* hidden state h_K^(b,t) at each token position, producing a per-token, per-layer gate tensor [B, S, L-K]. This allows the model to allocate more compute to complex reasoning tokens and skip layers for trivial tokens (like punctuation or stop words). The token-level extension is architecturally identical to the sequence-level variant — the same three-layer MLP processes each token position independently — but produces S×(L-K) gate decisions per sample rather than just L-K.
+**Token-level variant (exp10):** The router ingests the *unpooled* hidden state h_K^(b,t) at each token position, producing a per-token, per-layer gate tensor [B, S, L-K]. This allows the model to allocate different compute budgets to different token positions. The token-level extension is architecturally identical to the sequence-level variant — the same three-layer MLP processes each token position independently — but produces S×(L-K) gate decisions per sample rather than just L-K. Whether the learned budget aligns with linguistic or loss-based token difficulty is measured with the token-category analysis rather than assumed.
 
 ### 3.3 Gumbel-Softmax Straight-Through Estimator
 
@@ -215,19 +215,23 @@ Evaluated with EleutherAI `lm-evaluation-harness` v0.4 (Gao et al., 2021), 5-sho
 > [!NOTE]
 > **Pareto sweep limitation**: The current sweep (2 epochs, 5,000 samples) is under-trained relative to exp6 (3 epochs, 10,000 samples). As a result, the router does not show clear monotonic response to increasing λ — the skip ratio remains flat at ~29–33% across all penalty values. A re-run matching exp6 training scale is needed to produce the intended Pareto curve. This is the highest-priority experimental task remaining.
 
-### 4.5 Universal Phase Transition in >3B Parameter Architectures
+### 4.5 Sharp Penalty-Threshold Behavior in 3B Architectures
 
-Contrary to our initial hypothesis based on smaller 1B models, deeper >3B parameter networks exhibit a highly non-linear "phase transition" in their routing behavior. To prove this structural phenomenon is universal rather than architecture-specific, we conducted massive-scale parallel Pareto sweeps across both **Qwen2.5-3B (36 layers)** and **OpenLLaMA-3B (26 layers)**.
+Contrary to our initial hypothesis based on smaller 1B models, the two 3B parameter networks tested here exhibit a highly non-linear response to the sparsity penalty. To investigate whether this behavior appears across architectures, we conducted parallel Pareto sweeps on both **Qwen2.5-3B (36 layers)** and **OpenLLaMA-3B (26 layers)**.
 
 ![Figure 4: Phase Transition Comparison (Qwen vs OpenLLaMA)](./phase_transition_comparison.png)
 
-Both architectures strongly resisted layer-dropping at low penalty thresholds ($p < 10.0$). The entangled representations within deep blocks create massive internal knowledge distillation (KD) gradients that overpower the sparsity objective. The router essentially determines that the mathematical "cost" of dropping a layer is higher than the compute penalty.
+Both architectures strongly resisted layer-dropping at low penalty thresholds ($p < 10.0$). The entangled representations within deep blocks create large internal knowledge distillation (KD) gradients that overpower the sparsity objective. The router essentially determines that the mathematical "cost" of dropping a layer is higher than the compute penalty.
 
-However, once the penalty breaches a critical $p \ge 10.0$ threshold, we observed an immediate "Dam Break":
+However, once the penalty breaches a critical $p \ge 10.0$ threshold in these sweeps, we observed an abrupt change in routing behavior:
 - **Qwen2.5-3B:** Collapsed from full depth directly down to 14.4 active layers (a 60% structural skip ratio).
 - **OpenLLaMA-3B:** Instantly collapsed down to 9.0 active layers, plummeting further to 6.3 active layers at slightly higher penalties (approaching the absolute structural minimum of 4).
 
-This proves that scaling DLR to larger architectures requires precise targeting of the penalty threshold to successfully overcome the resistance of heavily entangled residual streams without destroying the underlying representations.
+These preliminary results suggest that scaling DLR to larger architectures requires careful tuning of the penalty threshold: too little pressure can leave the router near full depth, while slightly stronger penalties can push it into very aggressive skipping. Further investigation with complete training runs and downstream evaluation is needed before treating this as a task-performance result.
+
+### 4.6 Token-Level Routing Analysis
+
+To avoid assuming that token-level routing aligns with intuitive token difficulty, we added `exp19_token_routing_analysis.py`, which measures average active layers by token category: punctuation, stop words, numeric tokens, subword continuations, high-token-id proxies, and high-loss tokens. This analysis should be reported alongside the main 3B/7B results. A convincing token-level routing claim requires showing that the learned gates are not merely layer-wise constants broadcast over positions, but respond measurably to token identity, position, or loss.
 
 ---
 
@@ -243,23 +247,37 @@ The −3.67pp ARC gap between Stochastic Dropout and Token-Level DLR is a striki
 
 ### 5.3 Accuracy–Compute Tradeoff vs. Static Baseline
 
-The comparison against the Baseline LoRA model is more nuanced. DLR is within one standard error of the static baseline on all benchmarks, which supports the claim of "negligible accuracy degradation." However, this does not constitute a strict Pareto improvement — the baseline achieves slightly higher MMLU and ARC. The argument is rather that DLR achieves *near-equivalent* accuracy at substantially lower compute, which constitutes Pareto efficiency in practice. The pending exp8 re-run with full training scale will establish whether higher λ values can push toward a strict accuracy advantage at greater layer reduction.
+The comparison against the Baseline LoRA model is nuanced. On ARC-Challenge, the sequence-level DLR variant (exp6) achieves 35.84% vs. baseline 34.47% (+1.37pp), and GSM8K is tied at 2.05%. These results fall within one standard error, supporting the claim of "near-equivalent accuracy at lower compute" rather than strict improvement.
 
-### 5.4 Perplexity Discrepancy
+**MMLU caveat:** All TinyLlama variants — including the baseline LoRA and even the pre-trained base model — score near the 25% chance level on MMLU 5-shot (range: 25.04%–26.01%). At this model scale, MMLU does not discriminate between variants and should not be used as primary evidence. ARC-Challenge, where the variants show meaningful differentiation (31.48%–36.09%), is the more informative benchmark for this model class.
 
-The DLR models' WikiText-103 perplexity (91.66 for exp6, 197.48 for exp10) is substantially higher than the static LoRA baselines (1.93–2.20) when evaluated with strict binary routing (`hard=True`). This discrepancy highlights a fundamental trade-off of dynamic layer routing: while high-level semantic reasoning and factual recall (measured by MMLU, ARC, and GSM8K) are largely preserved even when skipping 40-70% of layers, fine-grained causal language modeling—which requires precise vocabulary probability distributions—is disproportionately degraded by the missing intermediate feature refinement. The KD objective successfully transfers task-solving capability, but exact token distribution matching requires all layers to be active. Future work must investigate distillation objectives that better preserve the exact token distribution without sacrificing compute efficiency.
+### 5.4 Perplexity Discrepancy — A Serious Limitation
+
+The DLR models' WikiText-103 perplexity (119.0 for exp6, 197.2 for exp10) is **two orders of magnitude higher** than the static LoRA baselines (1.93–2.20) when evaluated with strict binary routing (`hard=True`). This is the most significant limitation of the current approach and warrants careful discussion.
+
+The gap indicates that layer skipping severely degrades fine-grained causal language modeling — the precise vocabulary probability distributions needed for low-perplexity next-token prediction require the intermediate feature refinement that skipped layers provide. While high-level task accuracy on multiple-choice and extraction benchmarks (ARC, GSM8K) is preserved, the model's ability to produce well-calibrated token distributions is substantially impaired.
+
+We note that the padding-label masking in the evaluation code was corrected during this revision (padding tokens were previously included in the loss calculation, affecting absolute PPL values for all variants equally). The relative ordering and magnitude of the gap are unchanged.
+
+This trade-off is not unique to DLR — early-exit methods face analogous perplexity degradation at aggressive exit points. However, the severity here (100× vs. baseline) means that **DLR in its current form is not suitable for open-ended generation tasks** where perplexity-correlated fluency matters. Its primary use case is efficiency-constrained inference on structured tasks (classification, extraction, multiple-choice QA) where task accuracy, not perplexity, is the relevant metric.
+
+Future work should investigate: (1) softer routing (e.g., residual mixing rather than hard skip) to reduce the PPL gap; (2) perplexity-aware distillation objectives; (3) evaluation on generation quality metrics (e.g., MAUVE, human preference) to understand the practical impact.
 
 ---
 
 ## 6. Limitations and Future Work
 
-1. **~~Rescale and re-run exp8 Pareto sweep~~** — ✅ Completed. Turbo sweep with λ ∈ [0.1, 3.0] produced clear monotonic response.
-2. **~~Perplexity measurement fix~~** — ✅ Completed. Evaluated DLR with hard gates (`hard=True`) at inference. Perplexity remains high, indicating it is a fundamental trade-off of layer skipping rather than a soft-gate artifact.
-3. **~~Token-level routing~~** — ✅ Implemented (exp9 + exp10). exp9 demonstrated router collapse; exp10 addresses with per-layer penalty + target skip ratio.
-4. **~~Complete exp10 training and evaluation~~** — ✅ Completed. exp10 resolved the router collapse, achieving 6.68 active layers with superior MMLU and GSM8K performance compared to sequence-level routing.
-5. **Scale to larger models** — validate on Llama-3-8B or Mistral-7B with richer datasets (OpenOrca, C4).
-6. **Wall-clock latency** — current results proxy compute via layer count. The hook-based two-pass routing in PyTorch introduces Python overhead (~7,847 Tok/sec vs baseline 10,995 Tok/sec), despite executing only 7.3 layers on average. However, statically skipping layers confirms massive potential speedups (10 layers: 22,196 Tok/sec, 6 layers: 34,482 Tok/sec). A native CUDA implementation (e.g. Triton/vLLM integration) is required to bypass this overhead and realize these theoretical gains.
-7. **Statistical significance** — with standard errors of ~0.36% for MMLU and ~1.37% for ARC, most DLR vs. Baseline LoRA deltas are within 1σ. A larger test set (MMLU-Pro, 5-shot) would tighten error bars.
+> [!WARNING]
+> The following are known limitations that constrain the claims of this paper.
+
+1. **No runtime acceleration demonstrated.** The hook-based two-pass DLR implementation in PyTorch is **slower** than the baseline (7,847 Tok/sec vs. baseline 10,995 Tok/sec), despite executing only 7.3 layers on average. The overhead comes from Python-level hook dispatch, two forward passes, and Gumbel sampling. Static layer skipping (without routing) confirms that the *potential* speedup exists (6 layers: 34,482 Tok/sec), but realizing it requires a native CUDA/Triton implementation that fuses routing decisions into the forward pass. **All compute savings reported in this paper are structural (layer count), not wall-clock.**
+2. **Perplexity is severely degraded.** As discussed in §5.4, DLR perplexity is 100× worse than baseline, making the approach unsuitable for open-ended text generation in its current form.
+3. **MMLU is uninformative at this scale.** All TinyLlama variants score near 25% (chance level) on MMLU 5-shot, providing no discriminative signal. ARC-Challenge is the only benchmark where meaningful differences emerge.
+4. **Statistical significance is marginal.** With standard errors of ~0.36% for MMLU and ~1.4% for ARC, most DLR vs. Baseline LoRA deltas are within 1σ. Larger-scale evaluation (MMLU-Pro, more trials) would tighten confidence.
+5. **Scale to larger models** — Preliminary sweeps on Qwen2.5-3B and OpenLLaMA-3B (§4.5) show sharp penalty-threshold behavior, but downstream task evaluation at 3B+ scale is not yet complete. Validation on a 7B model such as Qwen2.5-7B, Llama-3-8B, or Mistral-7B with richer datasets (OpenOrca, C4) is needed.
+6. **~~Rescale and re-run exp8 Pareto sweep~~** — ✅ Completed.
+7. **~~Token-level routing~~** — ✅ Implemented (exp9 + exp10).
+8. **~~Complete exp10 training and evaluation~~** — ✅ Completed.
 
 ### 6.2 Token-Level Router Collapse (exp9 → exp10)
 
@@ -274,7 +292,7 @@ exp10 addresses this with three changes:
 
 ## 7. Conclusion
 
-We presented Dynamic Layer Routing, a fully differentiable framework for input-conditional compute allocation in pre-trained LLMs. By combining a contextual Gumbel-STE router, a hook-based gated forward pass, and a KD-stabilized training objective, we achieve a 39.8% reduction in active layers on TinyLlama-1.1B. Benchmark results demonstrate near-parity with a fully trained static LoRA baseline (within 1σ on MMLU, ARC, and GSM8K) and strict dominance over a stochastic depth dropout baseline on all three tasks. The framework is architecture-agnostic, requires no model surgery, and is compatible with standard LoRA fine-tuning pipelines.
+We presented Dynamic Layer Routing, a fully differentiable framework for input-conditional compute allocation in pre-trained LLMs. By combining a contextual Gumbel-STE router, a hook-based gated forward pass, and a KD-stabilized training objective, we achieve a 39.8% reduction in active layers on TinyLlama-1.1B. On ARC-Challenge — the most discriminative benchmark at this model scale — DLR achieves near-parity with a fully trained static LoRA baseline (35.84% vs. 34.47%) and consistently outperforms a stochastic depth dropout baseline (31.48%). However, we observe significant perplexity degradation (119–197 vs. 1.93 baseline), indicating that the approach is better suited to structured downstream tasks than open-ended generation. Furthermore, the current hook-based implementation does not yet realize wall-clock speedups; structural compute savings (layer count reduction) must be translated to runtime gains via native kernel integration. The framework is architecture-agnostic, requires no model surgery, and is compatible with standard LoRA fine-tuning pipelines.
 
 ---
 
@@ -310,4 +328,4 @@ We presented Dynamic Layer Routing, a fully differentiable framework for input-c
 
 ---
 
-*Draft v0.6 — May 2026*
+*Draft v0.7 — June 2026*

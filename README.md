@@ -6,7 +6,7 @@ DLR introduces a novel, fully differentiable framework for input-conditional com
 
 ## Key Features & Contributions
 
-1. **Token-Level Granularity**: Trivial tokens (e.g., punctuation, stop words) skip the majority of layers, while complex reasoning tokens receive full-depth processing.
+1. **Token-Level Granularity**: The router can assign different layer budgets to different token positions. We include analysis utilities to test whether punctuation, stop words, rare tokens, and high-loss tokens receive different compute.
 2. **Contextual Gating**: Routing decisions are conditioned on semantically rich hidden states from the first four "always-kept" layers, rather than raw embeddings.
 3. **No Model Surgery**: The implementation uses a robust hook-based two-pass forward strategy that preserves internal invariants (RoPE, SDPA masking) and works out-of-the-box with HuggingFace models.
 4. **Stable End-to-End Training**: We replace high-variance REINFORCE estimators with a Gumbel-Softmax Straight-Through Estimator (STE), stabilized by Knowledge Distillation (KD) and a novel per-layer sparsity penalty with a target skip ratio regularizer.
@@ -29,11 +29,13 @@ The repository is structured as a progression of empirical studies, culminating 
 * **`exp9_ablation_no_kd.py`**: Ablation study verifying the necessity of the frozen teacher KD loss.
 
 ### Phase 4: Scaling to Larger Models
-* **`exp11_large_model_routing.py`**: Scales the token-level DLR architecture to Llama-3.2-3B. Optimized to run on an 8GB VRAM consumer GPU using 4-bit QLoRA and gradient accumulation.
+* **`exp11_large_model_routing.py`**: Scales the token-level DLR architecture to Qwen2.5-3B. Optimized to run on an 8GB VRAM consumer GPU using 4-bit QLoRA and gradient accumulation.
+* **`exp12_large_model_pareto.py`** / **`exp13_openllama_pareto.py`**: Pareto sweeps for Qwen2.5-3B and OpenLLaMA-3B.
+* **`exp19_token_routing_analysis.py`**: Token-category routing analysis for checking whether the learned router allocates compute differently across token types.
 
 ### Evaluation & Benchmarking
-* **`exp7_eval_harness.py`**: Integration with `lm-evaluation-harness` to run zero-shot benchmarks (MMLU, ARC-Challenge, GSM8K) and calculate WikiText-103 perplexity.
-* **`exp4_inference_benchmark.py`**: Physical hardware benchmarking script to measure actual wall-clock speedup (Tokens Per Second) and latency.
+* **`exp7_eval_harness.py`**: Integration with `lm-evaluation-harness` to run 5-shot benchmarks (MMLU, ARC-Challenge, GSM8K) and calculate WikiText-103 perplexity.
+* **`exp4_inference_benchmark.py`**: Physical hardware benchmarking script for structural layer skipping and current hook-based DLR latency. Current DLR reports structural compute savings, not realized wall-clock acceleration.
 * **`plot_results.py`**: Automated visualization suite that parses CSV logs and generates 10+ publication-ready figures (training dynamics, Pareto curves, and benchmark bar charts).
 
 ## Getting Started

@@ -1,9 +1,10 @@
 """
 exp13_openllama_pareto.py - Phase 4.5: OpenLLaMA 3B Pareto Sweep
 
-This script runs the exact same "Phase Transition" test we did on Qwen2.5-3B,
-but on the OpenLLaMA-3B architecture. This proves to academic reviewers that the 
-routing dam-break effect is a universal property of 3B parameter networks, not a quirk of Qwen.
+This script runs the same sharp-threshold routing sweep we used for Qwen2.5-3B,
+but on the OpenLLaMA-3B architecture. The goal is to test whether the observed
+penalty-threshold behavior appears across more than one 3B architecture, not to
+claim universality from two models.
 to force the deeper 36-layer router into sparsity and plot the ultimate 3B Pareto Frontier.
 
 Hardware config is automatically pulled from exp11 to ensure cloud-safe (OOM resilient) execution.

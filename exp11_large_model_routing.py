@@ -166,7 +166,7 @@ def main():
     import argparse
     import glob
 
-    parser = argparse.ArgumentParser(description="Phase 4: Llama-3.2-3B Token-Level Routing")
+    parser = argparse.ArgumentParser(description="Phase 4: Qwen2.5-3B Token-Level Routing")
     parser.add_argument("--resume", type=str, default="auto", 
                         help="Path to checkpoint directory or 'auto' to auto-resume latest, or 'none' to start fresh")
     parser.add_argument("--fresh", action="store_true", 
