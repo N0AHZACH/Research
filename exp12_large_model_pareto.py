@@ -34,7 +34,7 @@ MAX_LENGTH   = 512
 ALWAYS_KEEP  = 4
 
 # Publication-Grade Sweep (Rigorous Convergence)
-PENALTIES    = [10.0, 25.0, 50.0, 100.0, 250.0, 500.0]
+PENALTIES    = [0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
 
 TRAIN_SAMPLES    = 10_000
 EVAL_SAMPLES     = 1_000
@@ -171,9 +171,10 @@ def gated_forward(model, router, batch, temperature, hard=True):
     return outputs.logits, outputs.loss, gates
 
 def compute_kd_loss(s_logits, t_logits, T):
+    seq_len = s_logits.size(1)
     log_p = F.log_softmax(s_logits / T, dim=-1)
     p_teacher = F.softmax(t_logits / T, dim=-1)
-    return F.kl_div(log_p, p_teacher, reduction="batchmean") * (T**2)
+    return F.kl_div(log_p, p_teacher, reduction="batchmean") * (T**2) / seq_len
 
 # ---------------------------------------------------------------------------
 # Main Execution
