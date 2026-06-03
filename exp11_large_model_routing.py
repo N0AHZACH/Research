@@ -230,8 +230,8 @@ def main():
             # is used; torch.as_tensor() fails on that, so we stack explicitly.
             ids  = enc["input_ids"]
             mask = enc["attention_mask"]
-            self.input_ids      = ids  if isinstance(ids,  torch.Tensor) else torch.stack(ids)
-            self.attention_mask = mask if isinstance(mask, torch.Tensor) else torch.stack(mask)
+            self.input_ids      = ids  if isinstance(ids,  torch.Tensor) else torch.stack(list(ids))
+            self.attention_mask = mask if isinstance(mask, torch.Tensor) else torch.stack(list(mask))
             self.labels = self.input_ids.clone()
             self.labels[self.attention_mask == 0] = -100
         def __len__(self): return len(self.input_ids)
