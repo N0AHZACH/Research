@@ -213,14 +213,7 @@ def main():
 
     def tokenize(batch):
         out = tokenizer(batch["text"], truncation=True, padding="max_length", max_length=MAX_LENGTH)
-        
-        # ChatGPT Catch: Mask padded labels with -100 so they don't corrupt the loss!
-        labels = out["input_ids"].copy()
-        for i in range(len(labels)):
-            for j in range(len(labels[i])):
-                if out["attention_mask"][i][j] == 0:
-                    labels[i][j] = -100
-        out["labels"] = labels
+        out["labels"] = out["input_ids"].copy()
         return out
 
     # Use available CPU cores for tokenization (capped for low-core cloud VMs)
@@ -234,7 +227,8 @@ def main():
         def __init__(self, enc):
             self.input_ids = enc["input_ids"]
             self.attention_mask = enc["attention_mask"]
-            self.labels = enc["labels"]
+            self.labels = enc["labels"].clone()
+            self.labels[self.attention_mask == 0] = -100
         def __len__(self): return len(self.input_ids)
         def __getitem__(self, idx):
             return {
