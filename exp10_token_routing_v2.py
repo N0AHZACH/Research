@@ -236,11 +236,7 @@ def main():
     q_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
     base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=q_cfg, device_map="cuda", attn_implementation=ATTN_IMPL)
 
-    print("Loading frozen Teacher for KD ...")
-    teacher_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=q_cfg, device_map="cuda", attn_implementation=ATTN_IMPL)
-    for p in teacher_model.parameters():
-        p.requires_grad = False
-    teacher_model.eval()
+
 
     lora_cfg = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -375,11 +371,13 @@ def main():
         return outputs.logits, outputs.loss, gates
 
     def compute_kd_loss(s_logits, t_logits, T):
-        return F.kl_div(
+        seq_len = s_logits.size(1)
+        kl = F.kl_div(
             F.log_softmax(s_logits / T, dim=-1),
             F.softmax(t_logits  / T, dim=-1),
             reduction="batchmean",
         ) * (T ** 2)
+        return kl / seq_len
 
     def compute_gate_loss(gates):
         """
@@ -452,11 +450,14 @@ def main():
                 
                 student_logits, ce_loss, gates = gated_forward(model, batch, temperature=current_temp, hard=True)
 
+                model.eval()
                 with torch.no_grad():
-                    teacher_logits = teacher_model(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch.get("attention_mask"),
-                    ).logits
+                    with model.disable_adapter():
+                        teacher_logits = model(
+                            input_ids=batch["input_ids"],
+                            attention_mask=batch.get("attention_mask"),
+                        ).logits
+                model.train()
 
                 # Compute gate loss with per-layer penalty + target skip ratio
                 gate_loss, per_layer_activity = compute_gate_loss(gates)

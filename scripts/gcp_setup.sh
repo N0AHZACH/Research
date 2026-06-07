@@ -6,6 +6,11 @@ set -e
 
 echo "=== DLR Research: GCP T4 Setup ==="
 
+# 0. Install system dependencies for Ubuntu
+echo "Installing system dependencies..."
+sudo apt-get update
+sudo apt-get install -y python3 python3-pip python3-dev build-essential
+
 # 1. Install pip dependencies
 pip3 install --upgrade pip --break-system-packages
 pip3 install torch transformers peft datasets accelerate bitsandbytes lm-eval matplotlib pandas tqdm safetensors sentencepiece tiktoken protobuf --break-system-packages

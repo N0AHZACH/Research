@@ -1,5 +1,5 @@
 """
-exp7_eval_harness.py - Phase 3.4: Rigorous Evaluation Harness
+exp7_eval_harness.py - Phase 4: Qwen2.5-3B Evaluation Harness
 
 Benchmarks all three model variants on zero-shot MMLU, GSM8K, and ARC-Challenge
 to prove that reasoning capability is preserved when compute is dynamically reduced.
@@ -11,8 +11,8 @@ Model variants evaluated:
   4. token_router     : exp10 token-level routing checkpoint (our main contribution)
 
 Output:
-  - exp7_eval_results_<timestamp>.csv  : full per-task accuracy table
-  - exp7_eval_summary_<timestamp>.json : structured summary for manuscript
+  - exp20_qwen_eval_results_<timestamp>.csv  : full per-task accuracy table
+  - exp20_qwen_eval_summary_<timestamp>.json : structured summary for manuscript
 
 Requirements:
   pip install lm-eval>=0.4.0
@@ -81,11 +81,7 @@ args = parser.parse_args()
 # Checkpoint auto-detection
 # ---------------------------------------------------------------------------
 RESEARCH_DIR = Path(__file__).parent
-MODEL_ID     = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-CHECKPOINT_SEARCH_DIRS = [
-    RESEARCH_DIR,
-    RESEARCH_DIR / "results" / "checkpoints" / "runs",
-]
+MODEL_ID     = "Qwen/Qwen2.5-3B"
 
 def _latest_checkpoint(pattern: str) -> Optional[Path]:
     """
@@ -94,33 +90,27 @@ def _latest_checkpoint(pattern: str) -> Optional[Path]:
     Returns None if no valid checkpoint is found.
     """
     # First try: <run_dir>/best_model/ with adapter_config.json
-    candidates = []
-    for search_dir in CHECKPOINT_SEARCH_DIRS:
-        candidates.extend(search_dir.glob(f"{pattern}/best_model"))
-    candidates = sorted(candidates, reverse=True)
+    candidates = sorted(RESEARCH_DIR.glob(f"{pattern}/best_model"), reverse=True)
     for c in candidates:
         if (c / "adapter_config.json").exists():
             return c
     # Second try: the run dir itself (no best_model subdir)
-    dirs = []
-    for search_dir in CHECKPOINT_SEARCH_DIRS:
-        dirs.extend(search_dir.glob(pattern))
-    dirs = sorted(dirs, reverse=True)
+    dirs = sorted(RESEARCH_DIR.glob(pattern), reverse=True)
     for d in dirs:
         if (d / "adapter_config.json").exists():
             return d
     return None  # No valid checkpoint found
 
-BASELINE_PATH   = Path(args.baseline_path)   if args.baseline_path   else _latest_checkpoint("exp1_baseline_output_*")
-STOCHASTIC_PATH = Path(args.stochastic_path) if args.stochastic_path else _latest_checkpoint("exp2_stochastic_output_*")
-GUMBEL_PATH     = Path(args.gumbel_path)     if args.gumbel_path     else _latest_checkpoint("exp6_gumbel_output_*")
+BASELINE_PATH   = Path(args.baseline_path)   if args.baseline_path   else _latest_checkpoint("exp14_qwen_baseline_output_*")
+STOCHASTIC_PATH = Path(args.stochastic_path) if args.stochastic_path else _latest_checkpoint("exp15_qwen_stochastic_output_*")
+    # Gumbel path removed as it doesn't apply to Qwen
 # Token-level: prefer exp10 (fixed), fall back to exp9
 TOKEN_PATH      = (Path(args.token_path) if args.token_path
-                   else (_latest_checkpoint("exp10_token_output_*") or _latest_checkpoint("exp9_token_output_*")))
+                   else (_latest_checkpoint("exp11_llama3_output_*") or _latest_checkpoint("exp11_llama3_output_*")))
 
 TIMESTAMP   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_OUT     = RESEARCH_DIR / f"exp7_eval_results_{TIMESTAMP}.csv"
-JSON_OUT    = RESEARCH_DIR / f"exp7_eval_summary_{TIMESTAMP}.json"
+CSV_OUT     = RESEARCH_DIR / f"exp20_qwen_eval_results_{TIMESTAMP}.csv"
+JSON_OUT    = RESEARCH_DIR / f"exp20_qwen_eval_summary_{TIMESTAMP}.json"
 
 # ---------------------------------------------------------------------------
 # Check lm-eval is installed
@@ -137,11 +127,11 @@ except ImportError:
     print("          Install with: pip install lm-eval>=0.4.0")
 
 # ---------------------------------------------------------------------------
-# GumbelRouter (must be re-declared to load router_weights.pt)
+# TokenLevelGumbelRouter (must be re-declared to load router_weights.pt)
 # ---------------------------------------------------------------------------
 import torch.nn as nn
 
-class GumbelRouter(nn.Module):
+class TokenLevelGumbelRouter(nn.Module):
     """
     Universal router architecture matching both exp6 and exp9.
     Accepts 2D [B, H] (sequence-level) or 3D [B, S, H] (token-level) hidden states.
@@ -173,8 +163,8 @@ ALWAYS_KEEP = 4  # must match exp6 config
 
 
 def load_base_model(device="cuda"):
-    """Load frozen TinyLlama as a reference (no LoRA)."""
-    print(f"  Loading base TinyLlama from hub...")
+    """Load frozen Qwen as a reference (no LoRA)."""
+    print(f"  Loading base Qwen from hub...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID, torch_dtype=torch.bfloat16, device_map=device, attn_implementation="sdpa"
     )
@@ -222,7 +212,7 @@ def load_gumbel_checkpoint(checkpoint_path: Path, device="cuda"):
 
     TOTAL_LAYERS    = len(model.base_model.model.model.layers)
     ROUTABLE_LAYERS = TOTAL_LAYERS - ALWAYS_KEEP
-    model.router    = GumbelRouter(model.config.hidden_size, ROUTABLE_LAYERS).to(device)
+    model.router    = TokenLevelGumbelRouter(model.config.hidden_size, ROUTABLE_LAYERS).to(device)
 
     router_weights = checkpoint_path / "router_weights.pt"
     if router_weights.exists():
@@ -423,7 +413,7 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
     """
     Evaluate a single model variant.
     If the checkpoint is missing or invalid (e.g. exp1/exp2 that never saved),
-    falls back to evaluating the pretrained base TinyLlama and notes it in results.
+    falls back to evaluating the pretrained base Qwen and notes it in results.
     Returns a dict with all metrics.
     """
     print(f"\n{'='*60}")
@@ -434,7 +424,7 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
     if checkpoint is None:
         print(f"  [FALLBACK] No saved checkpoint found for '{name}'.")
         print(f"             exp1/exp2 scripts did not call model.save_pretrained().")
-        print(f"             Evaluating pretrained base TinyLlama as a proxy.")
+        print(f"             Evaluating pretrained base Qwen as a proxy.")
         use_base_fallback = True
 
     try:
@@ -443,12 +433,12 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
         model, tokenizer = load_fn(Path(checkpoint))
     except (FileNotFoundError, ValueError, OSError) as e:
         print(f"  [FALLBACK] Could not load checkpoint ({e}).")
-        print(f"             Using pretrained base TinyLlama as proxy for '{name}'.")
+        print(f"             Using pretrained base Qwen as proxy for '{name}'.")
         use_base_fallback = True
         is_gumbel = False
         model, tokenizer = load_base_model()
 
-    is_token_level = "token" in str(checkpoint).lower() if checkpoint else False
+    is_token_level = True # Always True for Qwen token router
     # Perplexity (always run)
     ppl, avg_layers = eval_perplexity(model, tokenizer, is_gumbel=is_gumbel, is_token_level=is_token_level)
 
@@ -497,7 +487,7 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
             gc.collect()
 
             # Re-create router and load saved weights
-            router = GumbelRouter(hidden_size, routable_layers).to("cuda")
+            router = TokenLevelGumbelRouter(hidden_size, routable_layers).to("cuda")
             router.load_state_dict({k: v.to("cuda") for k, v in router_state.items()})
             router.eval()
             del router_state
@@ -591,8 +581,8 @@ def main():
 
     all_results = []
 
-    # ── 1. Base TinyLlama (no fine-tuning, reference point) ──────────────────
-    print("\n[1/4] Base TinyLlama (reference — no fine-tuning)")
+    # ── 1. Base Qwen (no fine-tuning, reference point) ──────────────────
+    print("\n[1/4] Base Qwen (reference — no fine-tuning)")
     base_model, base_tokenizer = load_base_model()
     ppl_base, _ = eval_perplexity(base_model, base_tokenizer, is_gumbel=False)
     base_result = {
@@ -629,23 +619,18 @@ def main():
         all_results.append(r)
         torch.cuda.empty_cache()
 
-    # ── 4. Gumbel Router (exp6 — sequence-level routing) ────────────────────
-    print("\n[4/5] Gumbel Router (exp6 — Gumbel-STE + KD, sequence-level)")
-    r = evaluate_variant("gumbel_router", load_gumbel_checkpoint, GUMBEL_PATH, is_gumbel=True)
-    all_results.append(r)
 
-    # ── 5. Token-Level Router (exp10/exp9 — our main contribution) ─────────
+    # ── 4. Token-Level Router (exp11 — our main contribution) ─────────
     if TOKEN_PATH is not None:
-        exp_label = "exp10" if "exp10" in str(TOKEN_PATH) else "exp9"
-        print(f"\n[5/5] Token-Level Router ({exp_label} — token-level routing)")
+        print(f"\n[4/4] Token-Level Router (exp11 — token-level routing)")
         r = evaluate_variant("token_router", load_gumbel_checkpoint, TOKEN_PATH, is_gumbel=True)
         all_results.append(r)
     else:
-        print("\n[5/5] Token-Level Router — skipped (no checkpoint found)")
+        print("\n[4/4] Token-Level Router — skipped (no checkpoint found)")
 
     # ── BONUS: Per-Layer Skip Analysis ────────────────────────────────────────
     # Prefer token-level model for skip analysis (more interesting per-token patterns)
-    skip_analysis_path = TOKEN_PATH if (TOKEN_PATH and Path(TOKEN_PATH).exists()) else GUMBEL_PATH
+    skip_analysis_path = TOKEN_PATH
     if skip_analysis_path is not None and Path(skip_analysis_path).exists():
         print(f"\n[BONUS] Computing per-layer skip rate from {skip_analysis_path}...")
         g_model, g_tok = load_gumbel_checkpoint(skip_analysis_path)
@@ -680,7 +665,6 @@ def main():
         "checkpoints": {
             "baseline": str(BASELINE_PATH),
             "stochastic": str(STOCHASTIC_PATH),
-            "gumbel": str(GUMBEL_PATH),
             "token_router": str(TOKEN_PATH),
         },
         "results": all_results,
@@ -748,7 +732,7 @@ def plot_per_layer_skip_rate(model, tokenizer, checkpoint_path, n_samples=200, d
     ds.set_format("torch")
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False)
 
-    is_token_level = "token" in str(checkpoint_path).lower()
+    is_token_level = True # Always True for Qwen token router
     per_layer_skip = torch.zeros(ROUTABLE)
     total_batches  = 0
     model.eval()

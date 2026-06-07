@@ -143,23 +143,12 @@ base_model = AutoModelForCausalLM.from_pretrained(
     attn_implementation=ATTN_IMPL,
 )
 
-print("Loading frozen Teacher for KD ...")
-teacher_model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID, 
-    torch_dtype=torch.bfloat16, 
-    device_map="cuda",
-    attn_implementation=ATTN_IMPL,
-)
-for p in teacher_model.parameters():
-    p.requires_grad = False
-teacher_model.eval()
 
 # Compile models for 15-20% speedup on modern GPUs
 if ATTN_IMPL == "sdpa":
     try:
         print("Compiling models with torch.compile...")
         model = torch.compile(model)
-        teacher_model = torch.compile(teacher_model)
     except Exception as e:
         print(f"[WARNING] torch.compile failed: {e}")
 
@@ -343,11 +332,13 @@ def gated_forward(model, batch, temperature, hard=True):
 
 def compute_kd_loss(s_logits, t_logits, T):
     """KL-Divergence KD loss with temperature T."""
-    return F.kl_div(
+    seq_len = s_logits.size(1)
+    kl = F.kl_div(
         F.log_softmax(s_logits / T, dim=-1),
         F.softmax(t_logits  / T, dim=-1),
         reduction="batchmean",
     ) * (T ** 2)
+    return kl / seq_len
 
 
 # ==============================================================================
@@ -381,12 +372,15 @@ for epoch in range(EPOCHS):
         # Student forward (gated)
         student_logits, ce_loss, gates = gated_forward(model, batch, temperature=current_temp, hard=True)
 
-        # Teacher forward (frozen)
+        # Teacher forward (frozen base model)
+        model.eval()
         with torch.no_grad():
-            teacher_logits = teacher_model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch.get("attention_mask"),
-            ).logits
+            with model.disable_adapter():
+                teacher_logits = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch.get("attention_mask"),
+                ).logits
+        model.train()
 
         # Sparsity loss: penalize fraction of gates active
         gate_loss = gates.float().mean() * COMPUTE_PENALTY

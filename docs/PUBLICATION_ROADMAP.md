@@ -28,8 +28,12 @@ This document outlines the critical next steps required to elevate the Dynamic L
 - [x] **Measure True Wall-Clock Latency (`exp4_inference_benchmark.py`)**
   - **Status:** ✅ Complete. Results integrated into manuscript Section 6. Python hook-based overhead measured, simulating massive gains for native CUDA implementation.
 
-- [x] **Tighten Statistical Significance in Evaluation**
-  - **Status:** ✅ Complete. Upgraded `exp7_eval_harness.py` to default to 5-shot evaluation (`--num_fewshot 5`) to shrink error bars. (Note: Running the full 5-shot benchmark across all 5 model variants will take a few hours and should be run overnight to generate the final manuscript numbers).
+- [ ] **Tighten Statistical Significance in Evaluation (In Progress)**
+  - **Status:** ⚠️ Partial. Upgraded `exp7_eval_harness.py` to default to 5-shot evaluation (`--num_fewshot 5`).
+  - **CRITICAL FIX IDENTIFIED:** The `lm-eval` library was evaluating routed models at full 22-layer depth because hooks were not passed. This has been fixed in code.
+  - **ACTION ITEM 1:** Allow the currently running `exp7` job to finish. Extract the valid MMLU/GSM8K/ARC scores for the Base, Baseline, and Stochastic models, as well as the valid Perplexity scores for all models.
+  - **ACTION ITEM 2:** Run `python exp7_eval_harness.py --skip_baseline` to re-evaluate ONLY the Gumbel and Token routers with the newly installed persistent hooks.
+  - **ACTION ITEM 3:** Manually merge the results from the two JSON/CSV outputs into Table 1 of the manuscript.
 
 ## Phase 4: Scaling (Guarding Against "Toy Setup" Critiques)
 

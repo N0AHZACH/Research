@@ -252,11 +252,13 @@ def gated_forward(model, batch, temperature, hard=True):
 
 
 def compute_kd_loss(s_logits, t_logits, T):
-    return F.kl_div(
+    seq_len = s_logits.size(1)
+    kl = F.kl_div(
         F.log_softmax(s_logits / T, dim=-1),
         F.softmax(t_logits  / T, dim=-1),
         reduction="batchmean",
     ) * (T ** 2)
+    return kl / seq_len
 
 # ---------------------------------------------------------------------------
 # Single penalty training run
@@ -331,7 +333,9 @@ def train_one_penalty(penalty: float, teacher_model, base_model) -> dict:
                     attention_mask=batch.get("attention_mask"),
                 ).logits
 
-            gate_loss = gates.float().mean() * penalty
+            # L1 penalty: sum of per-layer activities (so each layer contributes equally)
+            per_layer_activity = gates.float().mean(dim=0)
+            gate_loss = per_layer_activity.sum() * penalty
 
             # Gate entropy bonus — same as exp6 fix: prevents router from collapsing
             p_mean = gates.detach().float().mean()

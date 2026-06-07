@@ -99,9 +99,9 @@ def main():
     else:
         model = AutoModelForCausalLM.from_pretrained(MODEL_ID, device_map="auto", torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL)
 
-    lora_cfg = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none", task_type=TaskType.CAUSAL_LM)
+    lora_cfg = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.05, bias="none", task_type=TaskType.CAUSAL_LM)
     model = get_peft_model(model, lora_cfg)
-    model.print_trainable_parameters()\n
+    model.print_trainable_parameters()
     # --- STOCHASTIC DROPOUT ---
     import random
     def stochastic_hook(module, input, output):

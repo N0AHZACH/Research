@@ -155,7 +155,8 @@ def gated_forward(model, router, batch, temperature, hard=True):
 def compute_kd_loss(s_logits, t_logits, T):
     log_p = F.log_softmax(s_logits / T, dim=-1)
     p_teacher = F.softmax(t_logits / T, dim=-1)
-    return F.kl_div(log_p, p_teacher, reduction="batchmean") * (T**2)
+    seq_len = s_logits.size(1)
+    return (F.kl_div(log_p, p_teacher, reduction="batchmean") * (T**2)) / seq_len
 
 # ---------------------------------------------------------------------------
 # Main Execution

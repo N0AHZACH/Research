@@ -4,17 +4,43 @@ import matplotlib.ticker as mticker
 import glob
 import os
 import json
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parent
+METRICS_DIR = ROOT_DIR / "results" / "metrics"
+SUMMARY_DIR = ROOT_DIR / "results" / "eval_summaries"
+FIGURES_DIR = ROOT_DIR / "figures"
+FIGURES_DIR.mkdir(exist_ok=True)
+
+_ORIGINAL_SAVEFIG = plt.savefig
+
+
+def artifact_glob(pattern, folder=METRICS_DIR):
+    """Find artifacts in the organized archive, with root fallback for fresh runs."""
+    matches = glob.glob(str(folder / pattern)) + glob.glob(str(ROOT_DIR / pattern))
+    return sorted(set(matches))
+
+
+def savefig_to_figures(path, *args, **kwargs):
+    """Keep generated plots out of the repository root."""
+    output = Path(path)
+    if not output.is_absolute() and output.parent == Path("."):
+        output = FIGURES_DIR / output
+    return _ORIGINAL_SAVEFIG(output, *args, **kwargs)
+
+
+plt.savefig = savefig_to_figures
 
 def get_latest_csv(prefix):
     """Return the most recently modified CSV matching the given prefix pattern."""
     if "inference_benchmark" in prefix:
-        files = glob.glob(f"{prefix}_*.csv")
+        files = artifact_glob(f"{prefix}_*.csv")
     elif "exp7_eval" in prefix:
-        files = glob.glob(f"{prefix}_*.csv")
+        files = artifact_glob(f"{prefix}_*.csv")
     elif "exp11" in prefix or "exp10" in prefix or "exp9" in prefix:
-        files = glob.glob(f"{prefix}_*.csv")
+        files = artifact_glob(f"{prefix}_*.csv")
     else:
-        files = glob.glob(f"{prefix}_metrics_*.csv")
+        files = artifact_glob(f"{prefix}_metrics_*.csv")
     if not files:
         return None
     # Filter out empty files (header-only runs that crashed early)
@@ -138,7 +164,7 @@ def main():
     # =========================================================================
 
     # 5. Inference Speedup (Bar Chart)
-    inf_files = glob.glob("inference_benchmark_*.csv")
+    inf_files = artifact_glob("inference_benchmark_*.csv")
     if inf_files:
         inf_file = sorted(inf_files, key=os.path.getmtime, reverse=True)[0]
         df_inf = pd.read_csv(inf_file)
@@ -156,13 +182,13 @@ def main():
 
     # Prefer exp8 (Gumbel Pareto sweep) over exp5 (old REINFORCE sweep)
     # Prefer exp13 (OpenLLaMA 3B) and exp12 (Qwen 3B) sweeps
-    exp13_files = glob.glob("exp13_openllama_pareto_*.csv")
+    exp13_files = artifact_glob("exp13_openllama_pareto_*.csv")
     exp13_files = [f for f in exp13_files if os.path.getsize(f) > 100]
-    exp12_files = glob.glob("exp12_large_model_pareto_*.csv")
+    exp12_files = artifact_glob("exp12_large_model_pareto_*.csv")
     exp12_files = [f for f in exp12_files if os.path.getsize(f) > 100]
-    exp8_files = glob.glob("exp8_gumbel_pareto_*.csv")
+    exp8_files = artifact_glob("exp8_gumbel_pareto_*.csv")
     exp8_files = [f for f in exp8_files if os.path.getsize(f) > 100]
-    pareto_files = glob.glob("pareto_sweep_metrics_*.csv")
+    pareto_files = artifact_glob("pareto_sweep_metrics_*.csv")
     
     # -------------------------------------------------------------------------
     # NEW: 3B Architecture Comparison Graph (Qwen vs OpenLLaMA Phase Transition)
@@ -381,7 +407,7 @@ def main():
         exp9_file  = None
         if not exp11_file and not exp10_file:
             # Fallback to exp9 CSVs
-            exp9_files = glob.glob("exp9_token_level_routing_*.csv")
+            exp9_files = artifact_glob("exp9_token_level_routing_*.csv")
             exp9_files = [f for f in exp9_files if os.path.getsize(f) > 200]
             if exp9_files:
                 exp9_files.sort(key=os.path.getmtime, reverse=True)
@@ -502,7 +528,7 @@ def main():
     # PHASE 4 GRAPHS (exp7 Evaluation Harness — MMLU / GSM8K / ARC / PPL)
     # =========================================================================
     exp7_csv  = get_latest_csv("exp7_eval_results")
-    exp7_json = sorted(glob.glob("exp7_eval_summary_*.json"), key=os.path.getmtime, reverse=True)
+    exp7_json = sorted(artifact_glob("exp7_eval_summary_*.json", SUMMARY_DIR), key=os.path.getmtime, reverse=True)
     exp7_json = exp7_json[0] if exp7_json else None
 
     if exp7_csv:

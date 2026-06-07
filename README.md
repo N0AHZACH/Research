@@ -11,6 +11,19 @@ DLR introduces a novel, fully differentiable framework for input-conditional com
 3. **No Model Surgery**: The implementation uses a robust hook-based two-pass forward strategy that preserves internal invariants (RoPE, SDPA masking) and works out-of-the-box with HuggingFace models.
 4. **Stable End-to-End Training**: We replace high-variance REINFORCE estimators with a Gumbel-Softmax Straight-Through Estimator (STE), stabilized by Knowledge Distillation (KD) and a novel per-layer sparsity penalty with a target skip ratio regularizer.
 
+## Repository Layout
+
+The root directory is reserved for runnable experiment and analysis entry points:
+
+* **`exp*.py`**: Chronological experiment scripts, from TinyLlama baselines through Qwen/OpenLLaMA scaling.
+* **`plot_results.py`**: Regenerates publication figures from experiment CSV logs.
+* **`docs/`**: Manuscript draft, publication roadmap, and project context notes.
+* **`figures/`**: Generated plots and manuscript-ready images.
+* **`results/metrics/`**: CSV training logs, Pareto sweeps, and benchmark tables.
+* **`results/eval_summaries/`**: JSON summaries from evaluation harness runs.
+* **`results/checkpoints/`**: Archived model output directories and standalone checkpoint files.
+* **`scripts/`**: Environment setup and one-off repair utilities.
+
 ## Experimental Suite
 
 The repository is structured as a progression of empirical studies, culminating in the final token-level architecture:
@@ -21,7 +34,7 @@ The repository is structured as a progression of empirical studies, culminating 
 
 ### Phase 2: Sequence-Level Routing
 * **`exp6_gumbel_router.py`**: The first DLR variant using sequence-level routing (one routing decision per sample). Reduces active layers by ~40% while maintaining near-parity with the static baseline.
-* **`exp8_gumbel_pareto_sweep.py`**: Automated hyperparameter sweep over the compute penalty (`λ`) to generate the Accuracy vs. Compute Pareto frontier.
+* **`exp8_gumbel_pareto_sweep.py`**: Automated hyperparameter sweep over the compute penalty (`lambda`) to generate the Accuracy vs. Compute Pareto frontier.
 
 ### Phase 3: Token-Level Routing (Final Architecture)
 * **`exp9_token_level_routing.py`**: Initial token-level routing experiments.
@@ -65,4 +78,4 @@ python exp4_inference_benchmark.py
 
 ## Results
 
-*Please refer to `manuscript_draft.md` for our full methodology, empirical analysis, and final benchmark numbers comparing DLR against static and stochastic baselines.*
+*Please refer to `docs/manuscript_draft.md` for our full methodology, empirical analysis, and final benchmark numbers comparing DLR against static and stochastic baselines. Generated figures are in `figures/`, and raw metric logs are in `results/metrics/`.*

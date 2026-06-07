@@ -1,12 +1,11 @@
 __pycache__/
 *.pyc
 
-# Ignore model output directories (checkpoints)
+# Ignore model output directories (checkpoints), wherever they are archived.
 *_output_*/
 
 # Ignore Hugging Face cache
 .cache/
 
-# Ignore PyTorch checkpoints. This is not needed for now.......Do not use my checkpoint file.
+# Ignore large PyTorch checkpoints.
 *.pt
-

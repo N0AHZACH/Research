@@ -161,7 +161,8 @@ def gated_forward(model, batch, temperature, hard=True):
     return outputs.logits, outputs.loss, ctx.gates
 
 def compute_kd_loss(s_logits, t_logits, T):
-    return F.kl_div(F.log_softmax(s_logits/T, dim=-1), F.softmax(t_logits/T, dim=-1), reduction="batchmean") * (T**2)
+    seq_len = s_logits.size(1)
+    return (F.kl_div(F.log_softmax(s_logits/T, dim=-1), F.softmax(t_logits/T, dim=-1), reduction="batchmean") * (T**2)) / seq_len
 
 def train_one_penalty(penalty: float, teacher_model, base_model) -> dict:
     print(f"\n--- lambda={penalty:.3f} ---")
