@@ -24,7 +24,7 @@ Usage:
 """
 
 import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import csv
 import gc
 import json
@@ -176,8 +176,8 @@ def load_base_model(device="cuda"):
     """Load frozen TinyLlama as a reference (no LoRA)."""
     print(f"  Loading base TinyLlama from hub...")
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, device_map=device, attn_implementation="sdpa"
-    )
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
+    ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
@@ -198,10 +198,11 @@ def load_lora_checkpoint(checkpoint_path: Path, device="cuda"):
         )
     print(f"  Loading LoRA checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, device_map=device, attn_implementation="sdpa"
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
     )
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
     model = model.merge_and_unload()   # merge LoRA into base weights for standard eval
+    model = model.to(device)
     tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_path))
     tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
@@ -216,9 +217,9 @@ def load_gumbel_checkpoint(checkpoint_path: Path, device="cuda"):
     """
     print(f"  Loading Gumbel router checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, device_map=device, attn_implementation="sdpa"
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
     )
-    model = PeftModel.from_pretrained(base, str(checkpoint_path))
+    model = PeftModel.from_pretrained(base, str(checkpoint_path)).to(device)
 
     TOTAL_LAYERS    = len(model.base_model.model.model.layers)
     ROUTABLE_LAYERS = TOTAL_LAYERS - ALWAYS_KEEP
@@ -487,10 +488,10 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
             # Reload a fresh copy and merge LoRA — clean GPU state
             print(f"    Reloading fresh merged model for lm-eval...")
             base = AutoModelForCausalLM.from_pretrained(
-                MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda", attn_implementation="sdpa"
+                MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
             )
             peft_model = PeftModel.from_pretrained(base, str(checkpoint))
-            eval_model = peft_model.merge_and_unload()
+            eval_model = peft_model.merge_and_unload().to("cuda")
             del peft_model, base
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
