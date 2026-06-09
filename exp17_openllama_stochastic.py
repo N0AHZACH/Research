@@ -49,8 +49,8 @@ def get_optimal_config():
 BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL, USE_4BIT, COMPUTE_DTYPE = get_optimal_config()
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_FILENAME = f"exp17_openllama_baseline_metrics_{TIMESTAMP}.csv"
-SAVE_DIR     = f"exp17_openllama_baseline_output_{TIMESTAMP}"
+CSV_FILENAME = f"exp17_openllama_stochastic_metrics_{TIMESTAMP}.csv"
+SAVE_DIR     = f"exp17_openllama_stochastic_output_{TIMESTAMP}"
 
 def main():
     print(f"\n{'='*70}\n  EXP17: OPENLLAMA-3B FULL-DEPTH STOCHASTIC (36 Layers)\n{'='*70}")
@@ -168,7 +168,7 @@ def main():
                 ppl = torch.exp(torch.tensor(val_loss)).item()
 
                 with open(CSV_FILENAME, "a", newline="") as f:
-                    csv.writer(f).writerow([epoch, global_step, loss.item() * GRAD_ACCUM, val_loss, ppl, 13.0, 0.0])
+                    csv.writer(f).writerow([epoch, global_step, loss.item() * GRAD_ACCUM, val_loss, ppl, 15.0, 0.42])
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
