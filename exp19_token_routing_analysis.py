@@ -132,9 +132,8 @@ def main():
     base = AutoModelForCausalLM.from_pretrained(
         args.model_id,
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-        device_map=device,
         attn_implementation="sdpa",
-    )
+    ).to(device)
     model = PeftModel.from_pretrained(base, str(ckpt))
     tokenizer = AutoTokenizer.from_pretrained(str(ckpt))
     tokenizer.pad_token = tokenizer.eos_token
@@ -148,7 +147,7 @@ def main():
     model.router.load_state_dict(torch.load(str(router_path), map_location=device))
     model.eval()
 
-    raw = load_dataset("wikitext", "wikitext-103-raw-v1", split="validation")
+    raw = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="validation")
     raw = raw.filter(lambda x: len(x["text"]) > 100).select(range(args.samples))
 
     stats = defaultdict(lambda: {"tokens": 0, "active_sum": 0.0, "loss_sum": 0.0, "loss_tokens": 0, "high_loss_tokens": 0})
