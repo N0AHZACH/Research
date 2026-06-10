@@ -97,7 +97,7 @@ def install_gate_hooks(model, gates, always_keep):
 
 
 def classify_token(token_text: str, token_id: int, tokenizer) -> set[str]:
-    cleaned = token_text.replace("▁", "").replace("Ġ", "").strip()
+    cleaned = token_text.replace(" ", "").replace("Ġ", "").strip()
     cats = {"all"}
     if not cleaned:
         cats.add("whitespace_or_empty")
@@ -107,7 +107,7 @@ def classify_token(token_text: str, token_id: int, tokenizer) -> set[str]:
         cats.add("stop_word")
     if any(ch.isdigit() for ch in cleaned):
         cats.add("numeric")
-    if cleaned and not token_text.startswith(("▁", "Ġ")):
+    if cleaned and not token_text.startswith((" ", "Ġ")):
         cats.add("subword_or_continuation")
     if token_id >= int(0.9 * tokenizer.vocab_size):
         cats.add("high_id_token")

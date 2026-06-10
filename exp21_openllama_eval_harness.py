@@ -313,7 +313,7 @@ def eval_perplexity(model, tokenizer, is_gumbel: bool, is_token_level: bool = Fa
     Returns: (perplexity, avg_active_layers_or_None)
     """
     print("    Computing Wikitext-103 validation perplexity...")
-    raw = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="validation")
+    raw = load_dataset("wikitext", "wikitext-103-raw-v1", split="validation")
     raw = raw.filter(lambda x: len(x["text"]) > 100)
     raw = raw.select(range(min(PERPLEXITY_SAMPLES, len(raw))))
 
@@ -714,7 +714,7 @@ def plot_per_layer_skip_rate(model, tokenizer, checkpoint_path, n_samples=200, d
     TOTAL_LAYERS = len(model.base_model.model.model.layers)
     ROUTABLE     = TOTAL_LAYERS - ALWAYS_KEEP
 
-    raw  = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="validation")
+    raw  = load_dataset("wikitext", "wikitext-103-raw-v1", split="validation")
     raw  = raw.filter(lambda x: len(x["text"]) > 100).select(range(min(n_samples, len(raw))))
 
     def tok(batch):

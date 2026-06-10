@@ -106,7 +106,7 @@ STOCHASTIC_PATH = Path(args.stochastic_path) if args.stochastic_path else _lates
     # Gumbel path removed as it doesn't apply to Qwen
 # Token-level: prefer exp10 (fixed), fall back to exp9
 TOKEN_PATH      = (Path(args.token_path) if args.token_path
-                   else (_latest_checkpoint("exp11_llama3_output_*") or _latest_checkpoint("exp11_llama3_output_*")))
+                   else (_latest_checkpoint("exp10_qwen_token_output_*") or _latest_checkpoint("exp9_qwen_token_output_*")))
 
 TIMESTAMP   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CSV_OUT     = RESEARCH_DIR / f"exp20_qwen_eval_results_{TIMESTAMP}.csv"
@@ -166,8 +166,8 @@ def load_base_model(device="cuda"):
     """Load frozen Qwen as a reference (no LoRA)."""
     print(f"  Loading base Qwen from hub...")
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, device_map=device, attn_implementation="sdpa"
-    )
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
+    ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
@@ -188,8 +188,8 @@ def load_lora_checkpoint(checkpoint_path: Path, device="cuda"):
         )
     print(f"  Loading LoRA checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, device_map=device, attn_implementation="sdpa"
-    )
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
+    ).to(device)
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
     model = model.merge_and_unload()   # merge LoRA into base weights for standard eval
     tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_path))
@@ -206,8 +206,8 @@ def load_gumbel_checkpoint(checkpoint_path: Path, device="cuda"):
     """
     print(f"  Loading Gumbel router checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, device_map=device, attn_implementation="sdpa"
-    )
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
+    ).to(device)
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
 
     TOTAL_LAYERS    = len(model.base_model.model.model.layers)
@@ -313,7 +313,7 @@ def eval_perplexity(model, tokenizer, is_gumbel: bool, is_token_level: bool = Fa
     Returns: (perplexity, avg_active_layers_or_None)
     """
     print("    Computing Wikitext-103 validation perplexity...")
-    raw = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="validation")
+    raw = load_dataset("wikitext", "wikitext-103-raw-v1", split="validation")
     raw = raw.filter(lambda x: len(x["text"]) > 100)
     raw = raw.select(range(min(PERPLEXITY_SAMPLES, len(raw))))
 
@@ -477,8 +477,8 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
             # Reload a fresh copy and merge LoRA — clean GPU state
             print(f"    Reloading fresh merged model for lm-eval...")
             base = AutoModelForCausalLM.from_pretrained(
-                MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda", attn_implementation="sdpa"
-            )
+                MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
+            ).to("cuda")
             peft_model = PeftModel.from_pretrained(base, str(checkpoint))
             eval_model = peft_model.merge_and_unload()
             del peft_model, base
@@ -714,7 +714,7 @@ def plot_per_layer_skip_rate(model, tokenizer, checkpoint_path, n_samples=200, d
     TOTAL_LAYERS = len(model.base_model.model.model.layers)
     ROUTABLE     = TOTAL_LAYERS - ALWAYS_KEEP
 
-    raw  = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="validation")
+    raw  = load_dataset("wikitext", "wikitext-103-raw-v1", split="validation")
     raw  = raw.filter(lambda x: len(x["text"]) > 100).select(range(min(n_samples, len(raw))))
 
     def tok(batch):
