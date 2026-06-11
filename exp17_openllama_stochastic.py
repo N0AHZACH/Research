@@ -128,52 +128,81 @@ def main():
     best_val_loss = float("inf")
 
     print("\nStarting Training...")
-    for epoch in range(1, EPOCHS + 1):
-        model.train()
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")
-        
-        for batch in pbar:
-            global_step += 1
-            input_ids = batch["input_ids"].to("cuda")
-            attention_mask = batch["attention_mask"].to("cuda")
-            labels = batch["labels"].to("cuda")
+    oom_count = 0
+    MAX_OOM_RETRIES = 5
 
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-            loss = outputs.loss / GRAD_ACCUM
-            loss.backward()
+    try:
+        for epoch in range(1, EPOCHS + 1):
+            model.train()
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")
+            
+            for batch in pbar:
+                global_step += 1
+                input_ids = batch["input_ids"].to("cuda")
+                attention_mask = batch["attention_mask"].to("cuda")
+                labels = batch["labels"].to("cuda")
 
-            if global_step % GRAD_ACCUM == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                optimizer.zero_grad()
+                try:
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                    loss = outputs.loss / GRAD_ACCUM
+                    loss.backward()
+                except torch.cuda.OutOfMemoryError:
+                    oom_count += 1
+                    print(f"\n[OOM] CUDA OOM (occurrence {oom_count}/{MAX_OOM_RETRIES}). Clearing cache and skipping batch...")
+                    optimizer.zero_grad()
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    if oom_count >= MAX_OOM_RETRIES:
+                        print("[OOM] Too many OOM errors. Saving checkpoint and exiting.")
+                        model.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
+                        return
+                    continue
 
-            if global_step % LOG_EVERY_STEPS == 0:
-                pbar.set_postfix({"Loss": f"{outputs.loss.item():.4f}"})
+                if global_step % GRAD_ACCUM == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                    optimizer.zero_grad()
 
-            if global_step % EVAL_EVERY_STEPS == 0:
-                model.eval()
-                val_loss = 0.0
-                eval_batches = 0
-                with torch.no_grad():
-                    for ev_batch in eval_loader:
-                        ev_inputs = ev_batch["input_ids"].to("cuda")
-                        ev_masks = ev_batch["attention_mask"].to("cuda")
-                        ev_labels = ev_batch["labels"].to("cuda")
-                        outputs = model(input_ids=ev_inputs, attention_mask=ev_masks, labels=ev_labels)
-                        val_loss += outputs.loss.item()
-                        eval_batches += 1
-                        if eval_batches >= MAX_EVAL_BATCHES: break
+                if global_step % LOG_EVERY_STEPS == 0:
+                    pbar.set_postfix({"Loss": f"{outputs.loss.item():.4f}"})
 
-                val_loss /= eval_batches
-                ppl = torch.exp(torch.tensor(val_loss)).item()
+                if global_step % EVAL_EVERY_STEPS == 0:
+                    model.eval()
+                    val_loss = 0.0
+                    eval_batches = 0
+                    with torch.no_grad():
+                        for ev_batch in eval_loader:
+                            ev_inputs = ev_batch["input_ids"].to("cuda")
+                            ev_masks = ev_batch["attention_mask"].to("cuda")
+                            ev_labels = ev_batch["labels"].to("cuda")
+                            outputs = model(input_ids=ev_inputs, attention_mask=ev_masks, labels=ev_labels)
+                            val_loss += outputs.loss.item()
+                            eval_batches += 1
+                            if eval_batches >= MAX_EVAL_BATCHES: break
 
-                with open(CSV_FILENAME, "a", newline="") as f:
-                    csv.writer(f).writerow([epoch, global_step, loss.item() * GRAD_ACCUM, val_loss, ppl, 15.0, 0.42])
+                    val_loss /= eval_batches
+                    ppl = torch.exp(torch.tensor(val_loss)).item()
 
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    model.save_pretrained(os.path.join(SAVE_DIR, "best_model"))
-                model.train()
+                    with open(CSV_FILENAME, "a", newline="") as f:
+                        csv.writer(f).writerow([epoch, global_step, loss.item() * GRAD_ACCUM, val_loss, ppl, 15.0, 0.42])
+
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        model.save_pretrained(os.path.join(SAVE_DIR, "best_model"))
+                    model.train()
+    except KeyboardInterrupt:
+        print("\n[INTERRUPT] Training interrupted by user. Saving checkpoint...")
+        model.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
+        print("Checkpoint saved successfully. Exiting.")
+        return
+    except Exception as e:
+        print(f"\n[ERROR] Unexpected error: {e}. Saving emergency checkpoint...")
+        model.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
+        raise
+
+    print("\nSaving final model checkpoint...")
+    os.makedirs(os.path.join(SAVE_DIR, "final_model"), exist_ok=True)
+    model.save_pretrained(os.path.join(SAVE_DIR, "final_model"))
 
 if __name__ == "__main__":
     main()
