@@ -89,11 +89,13 @@ def _latest_checkpoint(pattern: str) -> Optional[Path]:
     but ONLY if it contains adapter_config.json (i.e., was actually saved).
     Returns None if no valid checkpoint is found.
     """
-    # First try: <run_dir>/best_model/ with adapter_config.json
-    candidates = sorted(RESEARCH_DIR.glob(f"{pattern}/best_model"), reverse=True)
-    for c in candidates:
-        if (c / "adapter_config.json").exists():
-            return c
+    # Try all typical subdirectories saved by the training scripts
+    for subdir in ["best_model", "final_model", "checkpoint_latest"]:
+        candidates = sorted(RESEARCH_DIR.glob(f"{pattern}/{subdir}"), reverse=True)
+        for c in candidates:
+            if (c / "adapter_config.json").exists():
+                return c
+    
     # Second try: the run dir itself (no best_model subdir)
     dirs = sorted(RESEARCH_DIR.glob(pattern), reverse=True)
     for d in dirs:
@@ -104,9 +106,9 @@ def _latest_checkpoint(pattern: str) -> Optional[Path]:
 BASELINE_PATH   = Path(args.baseline_path)   if args.baseline_path   else _latest_checkpoint("exp14_qwen_baseline_output_*")
 STOCHASTIC_PATH = Path(args.stochastic_path) if args.stochastic_path else _latest_checkpoint("exp15_qwen_stochastic_output_*")
     # Gumbel path removed as it doesn't apply to Qwen
-# Token-level: prefer exp10 (fixed), fall back to exp9
+# Token-level: prefer exp11 (Qwen Token Router), fall back to exp11_llama3 (legacy naming), then exp10
 TOKEN_PATH      = (Path(args.token_path) if args.token_path
-                   else (_latest_checkpoint("exp10_qwen_token_output_*") or _latest_checkpoint("exp9_qwen_token_output_*")))
+                   else (_latest_checkpoint("exp11_qwen_token_output_*") or _latest_checkpoint("exp11_llama3_output_*") or _latest_checkpoint("exp10_qwen_token_output_*")))
 
 TIMESTAMP   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CSV_OUT     = RESEARCH_DIR / f"exp20_qwen_eval_results_{TIMESTAMP}.csv"

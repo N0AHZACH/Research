@@ -87,8 +87,8 @@ def get_optimal_config():
 BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL, USE_4BIT, COMPUTE_DTYPE = get_optimal_config()
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_FILENAME = f"exp11_llama3_token_routing_{TIMESTAMP}.csv"
-SAVE_DIR     = f"exp11_llama3_output_{TIMESTAMP}"
+CSV_FILENAME = f"exp11_qwen_token_routing_{TIMESTAMP}.csv"
+SAVE_DIR     = f"exp11_qwen_token_output_{TIMESTAMP}"
 
 # ==============================================================================
 # TOKEN-LEVEL Gumbel-Softmax Router (v2 - stronger init bias)
@@ -186,7 +186,7 @@ def main():
     current_temp = GUMBEL_TEMP
 
     def find_latest_checkpoint():
-        dirs = glob.glob("exp11_llama3_output_*")
+        dirs = glob.glob("exp11_qwen_token_output_*") + glob.glob("exp11_llama3_output_*")
         valid_checkpoints = []
         for d in dirs:
             ckpt_path = os.path.join(d, "checkpoint_latest", "training_states.pt")
@@ -295,13 +295,13 @@ def main():
         if latest_dir:
             checkpoint_dir = os.path.join(latest_dir, "checkpoint_latest")
             save_dir = latest_dir
-            csv_filename = f"{latest_dir.replace('exp11_llama3_output_', 'exp11_llama3_token_routing_')}.csv"
+            csv_filename = f"{latest_dir.replace('exp11_qwen_token_output_', 'exp11_qwen_token_routing_').replace('exp11_llama3_output_', 'exp11_llama3_token_routing_')}.csv"
     elif args.resume and args.resume.lower() != "none":
         checkpoint_dir = args.resume
         parent_dir = os.path.dirname(checkpoint_dir)
         if parent_dir:
             save_dir = parent_dir
-            csv_filename = f"{parent_dir.replace('exp11_llama3_output_', 'exp11_llama3_token_routing_')}.csv"
+            csv_filename = f"{parent_dir.replace('exp11_qwen_token_output_', 'exp11_qwen_token_routing_').replace('exp11_llama3_output_', 'exp11_llama3_token_routing_')}.csv"
         else:
             save_dir = checkpoint_dir
 
