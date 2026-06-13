@@ -165,10 +165,10 @@ ALWAYS_KEEP = 4  # must match exp6 config
 
 
 def load_base_model(device="cuda"):
-    """Load frozen Qwen as a reference (no LoRA)."""
-    print(f"  Loading base Qwen from hub...")
+    """Load frozen OpenLLaMA as a reference (no LoRA)."""
+    print(f"  Loading base OpenLLaMA from hub...")
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True
     ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.pad_token = tokenizer.eos_token
@@ -190,7 +190,7 @@ def load_lora_checkpoint(checkpoint_path: Path, device="cuda"):
         )
     print(f"  Loading LoRA checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True
     ).to(device)
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
     model = model.merge_and_unload()   # merge LoRA into base weights for standard eval
@@ -208,7 +208,7 @@ def load_gumbel_checkpoint(checkpoint_path: Path, device="cuda"):
     """
     print(f"  Loading Gumbel router checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True
     ).to(device)
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
 
@@ -426,7 +426,7 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
     if checkpoint is None:
         print(f"  [FALLBACK] No saved checkpoint found for '{name}'.")
         print(f"             exp1/exp2 scripts did not call model.save_pretrained().")
-        print(f"             Evaluating pretrained base Qwen as a proxy.")
+        print(f"             Evaluating pretrained base OpenLLaMA as a proxy.")
         use_base_fallback = True
 
     try:
@@ -435,18 +435,18 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
         model, tokenizer = load_fn(Path(checkpoint))
     except (FileNotFoundError, ValueError, OSError) as e:
         print(f"  [FALLBACK] Could not load checkpoint ({e}).")
-        print(f"             Using pretrained base Qwen as proxy for '{name}'.")
+        print(f"             Using pretrained base OpenLLaMA as proxy for '{name}'.")
         use_base_fallback = True
         is_gumbel = False
         model, tokenizer = load_base_model()
 
-    is_token_level = True # Always True for Qwen token router
+    is_token_level = True # Always True for OpenLLaMA token router
     # Perplexity (always run)
     ppl, avg_layers = eval_perplexity(model, tokenizer, is_gumbel=is_gumbel, is_token_level=is_token_level)
 
     result = {
         "variant": name,
-        "checkpoint": "base_tinyllama_fallback" if use_base_fallback else str(checkpoint),
+        "checkpoint": "base_openllama_fallback" if use_base_fallback else str(checkpoint),
         "status": "base_fallback" if use_base_fallback else "ok",
         "note": ("Checkpoint not saved by training script; base model used as proxy."
                  if use_base_fallback else ""),
@@ -479,7 +479,7 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
             # Reload a fresh copy and merge LoRA — clean GPU state
             print(f"    Reloading fresh merged model for lm-eval...")
             base = AutoModelForCausalLM.from_pretrained(
-                MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
+                MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True
             ).to("cuda")
             peft_model = PeftModel.from_pretrained(base, str(checkpoint))
             eval_model = peft_model.merge_and_unload()
@@ -584,11 +584,11 @@ def main():
     all_results = []
 
     # ── 1. Base Qwen (no fine-tuning, reference point) ──────────────────
-    print("\n[1/4] Base Qwen (reference — no fine-tuning)")
+    print("\n[1/4] Base OpenLLaMA (reference — no fine-tuning)")
     base_model, base_tokenizer = load_base_model()
     ppl_base, _ = eval_perplexity(base_model, base_tokenizer, is_gumbel=False)
     base_result = {
-        "variant": "base_tinyllama",
+        "variant": "base_openllama",
         "checkpoint": MODEL_ID,
         "status": "ok",
         "perplexity_wikitext103": round(ppl_base, 4),
@@ -734,7 +734,7 @@ def plot_per_layer_skip_rate(model, tokenizer, checkpoint_path, n_samples=200, d
     ds.set_format("torch")
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False)
 
-    is_token_level = True # Always True for Qwen token router
+    is_token_level = True # Always True for OpenLLaMA token router
     per_layer_skip = torch.zeros(ROUTABLE)
     total_batches  = 0
     model.eval()
