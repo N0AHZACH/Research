@@ -48,7 +48,13 @@ parser.add_argument("--num_fewshot", type=int, default=5,
 parser.add_argument("--limit", type=int, default=None,
                     help="Limit number of samples per task (for fast debug runs)")
 parser.add_argument("--skip_baseline", action="store_true",
-                    help="Skip evaluating baseline and stochastic variants")
+                    help="Skip evaluating baseline and stochastic variants (legacy)")
+parser.add_argument("--skip_base", action="store_true",
+                    help="Skip evaluating the base model")
+parser.add_argument("--skip_baseline_lora", action="store_true",
+                    help="Skip evaluating the baseline LoRA variant")
+parser.add_argument("--skip_stochastic", action="store_true",
+                    help="Skip evaluating the stochastic dropout variant")
 parser.add_argument("--batch_size", type=int, default=1,
                     help="Eval batch size per GPU")
 parser.add_argument(
@@ -583,43 +589,80 @@ def main():
 
     all_results = []
 
-    # ── 1. Base Qwen (no fine-tuning, reference point) ──────────────────
-    print("\n[1/4] Base Qwen (reference — no fine-tuning)")
-    base_model, base_tokenizer = load_base_model()
-    ppl_base, _ = eval_perplexity(base_model, base_tokenizer, is_gumbel=False)
-    base_result = {
-        "variant": "base_tinyllama",
-        "checkpoint": MODEL_ID,
-        "status": "ok",
-        "perplexity_wikitext103": round(ppl_base, 4),
-        "avg_active_layers": "N/A",
-    }
-    if LM_EVAL_AVAILABLE and args.tasks:
-        print("    Running lm-eval on base model...")
-        task_results = run_lm_eval(
-            base_model, base_tokenizer,
-            tasks=args.tasks, num_fewshot=args.num_fewshot,
-            batch_size=args.batch_size, limit=args.limit,
-        )
-        for task, metrics in task_results.items():
-            for metric, value in metrics.items():
-                base_result[f"{task}_{metric}"] = value
-    del base_model, base_tokenizer
-    torch.cuda.empty_cache()
-    all_results.append(base_result)
+    def save_checkpoint(results):
+        all_keys = []
+        for res in results:
+            for k in res:
+                if k not in all_keys:
+                    all_keys.append(k)
+        with open(CSV_OUT, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=all_keys, extrasaction="ignore")
+            writer.writeheader()
+            for res in results:
+                writer.writerow({k: res.get(k, "") for k in all_keys})
+        summary = {
+            "timestamp": TIMESTAMP,
+            "tasks": args.tasks,
+            "num_fewshot": args.num_fewshot,
+            "limit": args.limit,
+            "checkpoints": {
+                "baseline": str(BASELINE_PATH),
+                "stochastic": str(STOCHASTIC_PATH),
+                "token_router": str(TOKEN_PATH),
+            },
+            "results": results,
+        }
+        with open(JSON_OUT, "w") as f:
+            json.dump(summary, f, indent=2, default=str)
 
-    if not args.skip_baseline:
+    # ── 1. Base Qwen (no fine-tuning, reference point) ──────────────────
+    if not args.skip_base:
+        print("\n[1/4] Base Qwen (reference — no fine-tuning)")
+        base_model, base_tokenizer = load_base_model()
+        ppl_base, _ = eval_perplexity(base_model, base_tokenizer, is_gumbel=False)
+        base_result = {
+            "variant": "base_tinyllama",
+            "checkpoint": MODEL_ID,
+            "status": "ok",
+            "perplexity_wikitext103": round(ppl_base, 4),
+            "avg_active_layers": "N/A",
+        }
+        if LM_EVAL_AVAILABLE and args.tasks:
+            print("    Running lm-eval on base model...")
+            task_results = run_lm_eval(
+                base_model, base_tokenizer,
+                tasks=args.tasks, num_fewshot=args.num_fewshot,
+                batch_size=args.batch_size, limit=args.limit,
+            )
+            for task, metrics in task_results.items():
+                for metric, value in metrics.items():
+                    base_result[f"{task}_{metric}"] = value
+        del base_model, base_tokenizer
+        torch.cuda.empty_cache()
+        gc.collect()
+        all_results.append(base_result)
+        save_checkpoint(all_results)
+        print(f"  [Checkpoint] Intermediate results saved.")
+
+    if not args.skip_baseline and not args.skip_baseline_lora:
         # ── 2. Baseline LoRA (exp1) ───────────────────────────────────────────
         print("\n[2/4] Baseline LoRA (exp1 — static, all layers)")
         r = evaluate_variant("baseline_lora", load_lora_checkpoint, BASELINE_PATH, is_gumbel=False)
         all_results.append(r)
         torch.cuda.empty_cache()
+        gc.collect()
+        save_checkpoint(all_results)
+        print(f"  [Checkpoint] Intermediate results saved.")
 
+    if not args.skip_baseline and not args.skip_stochastic:
         # ── 3. Stochastic Dropout (exp2) ──────────────────────────────────────
         print("\n[3/4] Stochastic Dropout (exp2 — negative control)")
         r = evaluate_variant("stochastic_dropout", load_lora_checkpoint, STOCHASTIC_PATH, is_gumbel=False)
         all_results.append(r)
         torch.cuda.empty_cache()
+        gc.collect()
+        save_checkpoint(all_results)
+        print(f"  [Checkpoint] Intermediate results saved.")
 
 
     # ── 4. Token-Level Router (exp11 — our main contribution) ─────────
@@ -627,6 +670,8 @@ def main():
         print(f"\n[4/4] Token-Level Router (exp11 — token-level routing)")
         r = evaluate_variant("token_router", load_gumbel_checkpoint, TOKEN_PATH, is_gumbel=True)
         all_results.append(r)
+        save_checkpoint(all_results)
+        print(f"  [Checkpoint] Intermediate results saved.")
     else:
         print("\n[4/4] Token-Level Router — skipped (no checkpoint found)")
 
@@ -642,39 +687,6 @@ def main():
     torch.cuda.empty_cache()
 
     # ── Save results ──────────────────────────────────────────────────────────
-    print(f"\n{'='*70}")
-    print("  Saving results...")
-
-    # Collect all unique column keys
-    all_keys = []
-    for res in all_results:
-        for k in res:
-            if k not in all_keys:
-                all_keys.append(k)
-
-    with open(CSV_OUT, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=all_keys, extrasaction="ignore")
-        writer.writeheader()
-        for res in all_results:
-            writer.writerow({k: res.get(k, "") for k in all_keys})
-    print(f"  CSV  → {CSV_OUT}")
-
-    summary = {
-        "timestamp": TIMESTAMP,
-        "tasks": args.tasks,
-        "num_fewshot": args.num_fewshot,
-        "limit": args.limit,
-        "checkpoints": {
-            "baseline": str(BASELINE_PATH),
-            "stochastic": str(STOCHASTIC_PATH),
-            "token_router": str(TOKEN_PATH),
-        },
-        "results": all_results,
-    }
-    with open(JSON_OUT, "w") as f:
-        json.dump(summary, f, indent=2, default=str)
-    print(f"  JSON → {JSON_OUT}")
-
     # ── Print comparison table ────────────────────────────────────────────────
     print(f"\n{'='*70}")
     print("  SUMMARY TABLE")

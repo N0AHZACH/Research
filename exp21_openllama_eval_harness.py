@@ -589,6 +589,32 @@ def main():
 
     all_results = []
 
+    def save_checkpoint(results):
+        all_keys = []
+        for res in results:
+            for k in res:
+                if k not in all_keys:
+                    all_keys.append(k)
+        with open(CSV_OUT, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=all_keys, extrasaction="ignore")
+            writer.writeheader()
+            for res in results:
+                writer.writerow({k: res.get(k, "") for k in all_keys})
+        summary = {
+            "timestamp": TIMESTAMP,
+            "tasks": args.tasks,
+            "num_fewshot": args.num_fewshot,
+            "limit": args.limit,
+            "checkpoints": {
+                "baseline": str(BASELINE_PATH),
+                "stochastic": str(STOCHASTIC_PATH),
+                "token_router": str(TOKEN_PATH),
+            },
+            "results": results,
+        }
+        with open(JSON_OUT, "w") as f:
+            json.dump(summary, f, indent=2, default=str)
+
     # ── 1. Base Qwen (no fine-tuning, reference point) ──────────────────
     if not args.skip_base:
         print("\n[1/4] Base OpenLLaMA (reference — no fine-tuning)")
@@ -615,6 +641,8 @@ def main():
         torch.cuda.empty_cache()
         gc.collect()
         all_results.append(base_result)
+        save_checkpoint(all_results)
+        print(f"  [Checkpoint] Intermediate results saved.")
 
     if not args.skip_baseline and not args.skip_baseline_lora:
         # ── 2. Baseline LoRA (exp1) ───────────────────────────────────────────
@@ -623,6 +651,8 @@ def main():
         all_results.append(r)
         torch.cuda.empty_cache()
         gc.collect()
+        save_checkpoint(all_results)
+        print(f"  [Checkpoint] Intermediate results saved.")
 
     if not args.skip_baseline and not args.skip_stochastic:
         # ── 3. Stochastic Dropout (exp2) ──────────────────────────────────────
@@ -631,6 +661,8 @@ def main():
         all_results.append(r)
         torch.cuda.empty_cache()
         gc.collect()
+        save_checkpoint(all_results)
+        print(f"  [Checkpoint] Intermediate results saved.")
 
 
     # ── 4. Token-Level Router (exp11 — our main contribution) ─────────
@@ -638,6 +670,8 @@ def main():
         print(f"\n[4/4] Token-Level Router (exp11 — token-level routing)")
         r = evaluate_variant("token_router", load_gumbel_checkpoint, TOKEN_PATH, is_gumbel=True)
         all_results.append(r)
+        save_checkpoint(all_results)
+        print(f"  [Checkpoint] Intermediate results saved.")
     else:
         print("\n[4/4] Token-Level Router — skipped (no checkpoint found)")
 
@@ -656,36 +690,6 @@ def main():
     # ── Save results ──────────────────────────────────────────────────────────
     print(f"\n{'='*70}")
     print("  Saving results...")
-
-    # Collect all unique column keys
-    all_keys = []
-    for res in all_results:
-        for k in res:
-            if k not in all_keys:
-                all_keys.append(k)
-
-    with open(CSV_OUT, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=all_keys, extrasaction="ignore")
-        writer.writeheader()
-        for res in all_results:
-            writer.writerow({k: res.get(k, "") for k in all_keys})
-    print(f"  CSV  → {CSV_OUT}")
-
-    summary = {
-        "timestamp": TIMESTAMP,
-        "tasks": args.tasks,
-        "num_fewshot": args.num_fewshot,
-        "limit": args.limit,
-        "checkpoints": {
-            "baseline": str(BASELINE_PATH),
-            "stochastic": str(STOCHASTIC_PATH),
-            "token_router": str(TOKEN_PATH),
-        },
-        "results": all_results,
-    }
-    with open(JSON_OUT, "w") as f:
-        json.dump(summary, f, indent=2, default=str)
-    print(f"  JSON → {JSON_OUT}")
 
     # ── Print comparison table ────────────────────────────────────────────────
     print(f"\n{'='*70}")
