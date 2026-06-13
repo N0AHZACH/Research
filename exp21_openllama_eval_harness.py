@@ -55,6 +55,8 @@ parser.add_argument("--skip_baseline_lora", action="store_true",
                     help="Skip evaluating the baseline LoRA variant")
 parser.add_argument("--skip_stochastic", action="store_true",
                     help="Skip evaluating the stochastic dropout variant")
+parser.add_argument("--resume", action="store_true",
+                    help="Automatically resume from the most recent checkpoint in the directory")
 parser.add_argument("--batch_size", type=int, default=1,
                     help="Eval batch size per GPU")
 parser.add_argument(
@@ -587,7 +589,29 @@ def main():
     print(f"  Tasks: {args.tasks} | Few-shot: {args.num_fewshot} | Limit: {args.limit}")
     print("="*70)
 
+    global TIMESTAMP, CSV_OUT, JSON_OUT
     all_results = []
+    completed_variants = set()
+
+    if args.resume:
+        import glob
+        json_files = glob.glob(str(RESEARCH_DIR / "exp21_openllama_eval_summary_*.json"))
+        if json_files:
+            latest_json = max(json_files, key=os.path.getmtime)
+            print(f"  [Resume] Found previous checkpoint: {latest_json}")
+            try:
+                with open(latest_json, "r") as f:
+                    data = json.load(f)
+                    all_results = data.get("results", [])
+                    TIMESTAMP = data.get("timestamp", TIMESTAMP)
+                completed_variants = {r.get("variant") for r in all_results}
+                print(f"  [Resume] Already completed: {completed_variants}")
+                CSV_OUT = RESEARCH_DIR / f"exp21_openllama_eval_results_{TIMESTAMP}.csv"
+                JSON_OUT = RESEARCH_DIR / f"exp21_openllama_eval_summary_{TIMESTAMP}.json"
+            except Exception as e:
+                print(f"  [Resume] Failed to load checkpoint: {e}. Starting fresh.")
+        else:
+            print("  [Resume] No previous checkpoint found. Starting fresh.")
 
     def save_checkpoint(results):
         all_keys = []
@@ -616,7 +640,7 @@ def main():
             json.dump(summary, f, indent=2, default=str)
 
     # ── 1. Base Qwen (no fine-tuning, reference point) ──────────────────
-    if not args.skip_base:
+    if not args.skip_base and "base_openllama" not in completed_variants:
         print("\n[1/4] Base OpenLLaMA (reference — no fine-tuning)")
         base_model, base_tokenizer = load_base_model()
         ppl_base, _ = eval_perplexity(base_model, base_tokenizer, is_gumbel=False)
@@ -644,7 +668,7 @@ def main():
         save_checkpoint(all_results)
         print(f"  [Checkpoint] Intermediate results saved.")
 
-    if not args.skip_baseline and not args.skip_baseline_lora:
+    if not args.skip_baseline and not args.skip_baseline_lora and "baseline_lora" not in completed_variants:
         # ── 2. Baseline LoRA (exp1) ───────────────────────────────────────────
         print("\n[2/4] Baseline LoRA (exp1 — static, all layers)")
         r = evaluate_variant("baseline_lora", load_lora_checkpoint, BASELINE_PATH, is_gumbel=False)
@@ -654,7 +678,7 @@ def main():
         save_checkpoint(all_results)
         print(f"  [Checkpoint] Intermediate results saved.")
 
-    if not args.skip_baseline and not args.skip_stochastic:
+    if not args.skip_baseline and not args.skip_stochastic and "stochastic_dropout" not in completed_variants:
         # ── 3. Stochastic Dropout (exp2) ──────────────────────────────────────
         print("\n[3/4] Stochastic Dropout (exp2 — negative control)")
         r = evaluate_variant("stochastic_dropout", load_lora_checkpoint, STOCHASTIC_PATH, is_gumbel=False)
@@ -666,7 +690,7 @@ def main():
 
 
     # ── 4. Token-Level Router (exp11 — our main contribution) ─────────
-    if TOKEN_PATH is not None:
+    if TOKEN_PATH is not None and "token_router" not in completed_variants:
         print(f"\n[4/4] Token-Level Router (exp11 — token-level routing)")
         r = evaluate_variant("token_router", load_gumbel_checkpoint, TOKEN_PATH, is_gumbel=True)
         all_results.append(r)
