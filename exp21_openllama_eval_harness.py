@@ -606,6 +606,7 @@ def main():
                 base_result[f"{task}_{metric}"] = value
     del base_model, base_tokenizer
     torch.cuda.empty_cache()
+    gc.collect()
     all_results.append(base_result)
 
     if not args.skip_baseline:
@@ -614,12 +615,14 @@ def main():
         r = evaluate_variant("baseline_lora", load_lora_checkpoint, BASELINE_PATH, is_gumbel=False)
         all_results.append(r)
         torch.cuda.empty_cache()
+        gc.collect()
 
         # ── 3. Stochastic Dropout (exp2) ──────────────────────────────────────
         print("\n[3/4] Stochastic Dropout (exp2 — negative control)")
         r = evaluate_variant("stochastic_dropout", load_lora_checkpoint, STOCHASTIC_PATH, is_gumbel=False)
         all_results.append(r)
         torch.cuda.empty_cache()
+        gc.collect()
 
 
     # ── 4. Token-Level Router (exp11 — our main contribution) ─────────
@@ -640,6 +643,7 @@ def main():
         del g_model, g_tok
 
     torch.cuda.empty_cache()
+    gc.collect()
 
     # ── Save results ──────────────────────────────────────────────────────────
     print(f"\n{'='*70}")
