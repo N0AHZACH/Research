@@ -12,7 +12,8 @@ Default target: TinyLlama exp10 token router.
 """
 
 import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+if os.name != 'nt':
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import argparse
 import csv
 import string
@@ -97,7 +98,8 @@ def install_gate_hooks(model, gates, always_keep):
 
 
 def classify_token(token_text: str, token_id: int, tokenizer) -> set[str]:
-    cleaned = token_text.replace(" ", "").replace("Ġ", "").strip()
+    sp_space = chr(9601)
+    cleaned = token_text.replace(" ", "").replace("Ġ", "").replace(sp_space, "").strip()
     cats = {"all"}
     if not cleaned:
         cats.add("whitespace_or_empty")
@@ -107,7 +109,7 @@ def classify_token(token_text: str, token_id: int, tokenizer) -> set[str]:
         cats.add("stop_word")
     if any(ch.isdigit() for ch in cleaned):
         cats.add("numeric")
-    if cleaned and not token_text.startswith((" ", "Ġ")):
+    if cleaned and not token_text.startswith((" ", "Ġ", sp_space)):
         cats.add("subword_or_continuation")
     if token_id >= int(0.9 * tokenizer.vocab_size):
         cats.add("high_id_token")
@@ -131,7 +133,7 @@ def main():
 
     base = AutoModelForCausalLM.from_pretrained(
         args.model_id,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         attn_implementation="sdpa",
     ).to(device)
     model = PeftModel.from_pretrained(base, str(ckpt))

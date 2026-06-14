@@ -176,7 +176,7 @@ def load_base_model(device="cuda"):
     """Load frozen OpenLLaMA as a reference (no LoRA)."""
     print(f"  Loading base OpenLLaMA from hub...")
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True, use_safetensors=True
     ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.pad_token = tokenizer.eos_token
@@ -198,7 +198,7 @@ def load_lora_checkpoint(checkpoint_path: Path, device="cuda"):
         )
     print(f"  Loading LoRA checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True, use_safetensors=True
     ).to(device)
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
     model = model.merge_and_unload()   # merge LoRA into base weights for standard eval
@@ -216,7 +216,7 @@ def load_gumbel_checkpoint(checkpoint_path: Path, device="cuda"):
     """
     print(f"  Loading Gumbel router checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True, use_safetensors=True
     ).to(device)
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
 
@@ -487,7 +487,7 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
             # Reload a fresh copy and merge LoRA — clean GPU state
             print(f"    Reloading fresh merged model for lm-eval...")
             base = AutoModelForCausalLM.from_pretrained(
-                MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True
+                MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True, use_safetensors=True
             ).to("cuda")
             peft_model = PeftModel.from_pretrained(base, str(checkpoint))
             eval_model = peft_model.merge_and_unload()
