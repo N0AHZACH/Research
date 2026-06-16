@@ -26,14 +26,15 @@ def get_optimal_config():
     if not torch.cuda.is_available():
         return 2, 8, 0, None, True, torch.float32
 
-    vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    vram_gb = sum(torch.cuda.get_device_properties(i).total_memory for i in range(torch.cuda.device_count())) / (1024**3)
     gpu_name = torch.cuda.get_device_name(0)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
     is_turing = 'T4' in gpu_name or 'RTX 20' in gpu_name or 'Turing' in gpu_name
 
-    if vram_gb >= 70: bs, ga, use_4bit = 8, 2, False
+    if vram_gb >= 90: bs, ga, use_4bit = 16, 1, False
+    elif vram_gb >= 70: bs, ga, use_4bit = 8, 2, False
     elif vram_gb >= 35: bs, ga, use_4bit = 4, 4, False
     elif vram_gb >= 22: bs, ga, use_4bit = 2, 8, False
     elif vram_gb >= 14: bs, ga, use_4bit = 2, 8, True
@@ -41,9 +42,13 @@ def get_optimal_config():
 
     compute_dtype = torch.float16 if is_turing else torch.bfloat16
     cpu_count = os.cpu_count() or 2
-    nw = 0 if os.name == 'nt' else min(8, (cpu_count or 4) // 4)
-    attn = "flash_attention_2" if vram_gb >= 7 else None
-    print(f"[HARDWARE] GPU: {gpu_name} | {vram_gb:.1f}GB VRAM | BS={bs}, GA={ga}, 4bit={use_4bit}, dtype={compute_dtype}, workers={nw}")
+    nw = min(24, (cpu_count or 4) // 2)
+    try:
+        import flash_attn
+        attn = "flash_attention_2" if vram_gb >= 7 else None
+    except ImportError:
+        attn = "sdpa" if vram_gb >= 7 else None
+    print(f"[HARDWARE] GPU: {gpu_name} | {vram_gb:.1f}GB VRAM | BS={bs}, GA={ga}, 4bit={use_4bit}, dtype={compute_dtype}, workers={nw} | attn={attn}")
     return bs, ga, nw, attn, use_4bit, compute_dtype
 
 BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL, USE_4BIT, COMPUTE_DTYPE = get_optimal_config()
@@ -69,7 +74,7 @@ def main():
         o["labels"] = o["input_ids"].copy()
         return o
 
-    tok_procs = min(os.cpu_count() or 1, 2)
+    tok_procs = min(os.cpu_count() or 1, 32)
     train_enc = raw.map(tokenize_fn, batched=True, remove_columns=raw.column_names, num_proc=tok_procs)
     eval_enc  = eval_raw.map(tokenize_fn, batched=True, remove_columns=eval_raw.column_names, num_proc=tok_procs)
     train_enc.set_format("torch")

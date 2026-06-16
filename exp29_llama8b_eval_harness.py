@@ -57,7 +57,7 @@ parser.add_argument("--skip_stochastic", action="store_true",
                     help="Skip evaluating the stochastic dropout variant")
 parser.add_argument("--resume", action="store_true",
                     help="Automatically resume from the most recent checkpoint in the directory")
-parser.add_argument("--batch_size", type=int, default=1,
+parser.add_argument("--batch_size", type=int, default=8,
                     help="Eval batch size per GPU")
 parser.add_argument(
     "--baseline_path",
@@ -171,12 +171,21 @@ from peft import PeftModel
 
 ALWAYS_KEEP = 4  # must match exp6 config
 
+def get_attn_impl():
+    try:
+        import flash_attn
+        return "flash_attention_2"
+    except ImportError:
+        return "sdpa"
+
+ATTN_IMPL = get_attn_impl()
+
 
 def load_base_model(device="cuda"):
     """Load frozen Llama3.1-8B as a reference (no LoRA)."""
     print(f"  Loading base Llama3.1-8B from hub...")
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", low_cpu_mem_usage=True, use_safetensors=True
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL, low_cpu_mem_usage=True, use_safetensors=True
     ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.pad_token = tokenizer.eos_token
@@ -198,7 +207,7 @@ def load_lora_checkpoint(checkpoint_path: Path, device="cuda"):
         )
     print(f"  Loading LoRA checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", low_cpu_mem_usage=True, use_safetensors=True
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL, low_cpu_mem_usage=True, use_safetensors=True
     ).to(device)
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
     model = model.merge_and_unload()   # merge LoRA into base weights for standard eval
@@ -216,7 +225,7 @@ def load_gumbel_checkpoint(checkpoint_path: Path, device="cuda"):
     """
     print(f"  Loading Gumbel router checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", low_cpu_mem_usage=True, use_safetensors=True
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL, low_cpu_mem_usage=True, use_safetensors=True
     ).to(device)
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
 
@@ -487,7 +496,7 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
             # Reload a fresh copy and merge LoRA — clean GPU state
             print(f"    Reloading fresh merged model for lm-eval...")
             base = AutoModelForCausalLM.from_pretrained(
-                MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", low_cpu_mem_usage=True, use_safetensors=True
+                MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL, low_cpu_mem_usage=True, use_safetensors=True
             ).to("cuda")
             peft_model = PeftModel.from_pretrained(base, str(checkpoint))
             eval_model = peft_model.merge_and_unload()
