@@ -1,5 +1,5 @@
 """
-exp21_openllama_eval_harness.py - Phase 4: OpenLLaMA-3B Evaluation Harness
+exp22_qwen7b_eval_harness.py - Phase 4: Qwen2.5-7B Evaluation Harness (RTX 6000 optimized)
 
 Benchmarks all three model variants on zero-shot MMLU, GSM8K, and ARC-Challenge
 to prove that reasoning capability is preserved when compute is dynamically reduced.
@@ -11,20 +11,20 @@ Model variants evaluated:
   4. token_router     : exp10 token-level routing checkpoint (our main contribution)
 
 Output:
-  - exp21_openllama_eval_results_<timestamp>.csv  : full per-task accuracy table
-  - exp21_openllama_eval_summary_<timestamp>.json : structured summary for manuscript
+  - exp22_qwen7b_eval_results_<timestamp>.csv  : full per-task accuracy table
+  - exp22_qwen7b_eval_summary_<timestamp>.json : structured summary for manuscript
 
 Requirements:
   pip install lm-eval>=0.4.0
 
 Usage:
-  python exp21_openllama_eval_harness.py
-  python exp21_openllama_eval_harness.py --skip_baseline  # only eval gumbel
-  python exp21_openllama_eval_harness.py --tasks mmlu     # only run MMLU
+  python exp22_qwen7b_eval_harness.py
+  python exp22_qwen7b_eval_harness.py --skip_baseline  # only eval gumbel
+  python exp22_qwen7b_eval_harness.py --tasks mmlu     # only run MMLU
 """
 
 import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import csv
 import gc
 import json
@@ -89,7 +89,7 @@ args = parser.parse_args()
 # Checkpoint auto-detection
 # ---------------------------------------------------------------------------
 RESEARCH_DIR = Path(__file__).parent
-MODEL_ID     = "openlm-research/open_llama_3b_v2"
+MODEL_ID     = "Qwen/Qwen2.5-7B"
 
 def _latest_checkpoint(pattern: str) -> Optional[Path]:
     """
@@ -111,16 +111,16 @@ def _latest_checkpoint(pattern: str) -> Optional[Path]:
             return d
     return None  # No valid checkpoint found
 
-BASELINE_PATH   = Path(args.baseline_path)   if args.baseline_path   else _latest_checkpoint("exp16_openllama_baseline_output_*")
-STOCHASTIC_PATH = Path(args.stochastic_path) if args.stochastic_path else _latest_checkpoint("exp17_openllama_stochastic_output_*")
-
-# Token-level routing checkpoint
+BASELINE_PATH   = Path(args.baseline_path)   if args.baseline_path   else _latest_checkpoint("exp23_qwen7b_baseline_output_*")
+STOCHASTIC_PATH = Path(args.stochastic_path) if args.stochastic_path else _latest_checkpoint("exp24_qwen7b_stochastic_output_*")
+    # Gumbel path removed as it doesn't apply to Qwen
+# Token-level: prefer exp11 (Qwen Token Router), fall back to exp11_llama3 (legacy naming), then exp10
 TOKEN_PATH      = (Path(args.token_path) if args.token_path
-                   else _latest_checkpoint("exp18_openllama_output_*"))
+                   else (_latest_checkpoint("exp25_qwen7b_token_output_*") or _latest_checkpoint("exp25_qwen7b_token_output_*") or _latest_checkpoint("exp25_qwen7b_token_legacy_output_*")))
 
 TIMESTAMP   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_OUT     = RESEARCH_DIR / f"exp21_openllama_eval_results_{TIMESTAMP}.csv"
-JSON_OUT    = RESEARCH_DIR / f"exp21_openllama_eval_summary_{TIMESTAMP}.json"
+CSV_OUT     = RESEARCH_DIR / f"exp22_qwen7b_eval_results_{TIMESTAMP}.csv"
+JSON_OUT    = RESEARCH_DIR / f"exp22_qwen7b_eval_summary_{TIMESTAMP}.json"
 
 # ---------------------------------------------------------------------------
 # Check lm-eval is installed
@@ -173,10 +173,10 @@ ALWAYS_KEEP = 4  # must match exp6 config
 
 
 def load_base_model(device="cuda"):
-    """Load frozen OpenLLaMA as a reference (no LoRA)."""
-    print(f"  Loading base OpenLLaMA from hub...")
+    """Load frozen Qwen as a reference (no LoRA)."""
+    print(f"  Loading base Qwen from hub...")
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", low_cpu_mem_usage=True, use_safetensors=True
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", low_cpu_mem_usage=True
     ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.pad_token = tokenizer.eos_token
@@ -198,7 +198,7 @@ def load_lora_checkpoint(checkpoint_path: Path, device="cuda"):
         )
     print(f"  Loading LoRA checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", low_cpu_mem_usage=True, use_safetensors=True
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", low_cpu_mem_usage=True
     ).to(device)
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
     model = model.merge_and_unload()   # merge LoRA into base weights for standard eval
@@ -216,7 +216,7 @@ def load_gumbel_checkpoint(checkpoint_path: Path, device="cuda"):
     """
     print(f"  Loading Gumbel router checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", low_cpu_mem_usage=True, use_safetensors=True
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", low_cpu_mem_usage=True
     ).to(device)
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
 
@@ -434,7 +434,7 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
     if checkpoint is None:
         print(f"  [FALLBACK] No saved checkpoint found for '{name}'.")
         print(f"             exp1/exp2 scripts did not call model.save_pretrained().")
-        print(f"             Evaluating pretrained base OpenLLaMA as a proxy.")
+        print(f"             Evaluating pretrained base Qwen as a proxy.")
         use_base_fallback = True
 
     try:
@@ -443,18 +443,18 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
         model, tokenizer = load_fn(Path(checkpoint))
     except (FileNotFoundError, ValueError, OSError) as e:
         print(f"  [FALLBACK] Could not load checkpoint ({e}).")
-        print(f"             Using pretrained base OpenLLaMA as proxy for '{name}'.")
+        print(f"             Using pretrained base Qwen as proxy for '{name}'.")
         use_base_fallback = True
         is_gumbel = False
         model, tokenizer = load_base_model()
 
-    is_token_level = True # Always True for OpenLLaMA token router
+    is_token_level = True # Always True for Qwen token router
     # Perplexity (always run)
     ppl, avg_layers = eval_perplexity(model, tokenizer, is_gumbel=is_gumbel, is_token_level=is_token_level)
 
     result = {
         "variant": name,
-        "checkpoint": "base_openllama_fallback" if use_base_fallback else str(checkpoint),
+        "checkpoint": "base_qwen7b_fallback" if use_base_fallback else str(checkpoint),
         "status": "base_fallback" if use_base_fallback else "ok",
         "note": ("Checkpoint not saved by training script; base model used as proxy."
                  if use_base_fallback else ""),
@@ -487,7 +487,7 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
             # Reload a fresh copy and merge LoRA — clean GPU state
             print(f"    Reloading fresh merged model for lm-eval...")
             base = AutoModelForCausalLM.from_pretrained(
-                MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", low_cpu_mem_usage=True, use_safetensors=True
+                MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", low_cpu_mem_usage=True
             ).to("cuda")
             peft_model = PeftModel.from_pretrained(base, str(checkpoint))
             eval_model = peft_model.merge_and_unload()
@@ -595,7 +595,7 @@ def main():
 
     if args.resume:
         import glob
-        json_files = glob.glob(str(RESEARCH_DIR / "exp21_openllama_eval_summary_*.json"))
+        json_files = glob.glob(str(RESEARCH_DIR / "exp22_qwen7b_eval_summary_*.json"))
         if json_files:
             latest_json = max(json_files, key=os.path.getmtime)
             print(f"  [Resume] Found previous checkpoint: {latest_json}")
@@ -606,8 +606,8 @@ def main():
                     TIMESTAMP = data.get("timestamp", TIMESTAMP)
                 completed_variants = {r.get("variant") for r in all_results}
                 print(f"  [Resume] Already completed: {completed_variants}")
-                CSV_OUT = RESEARCH_DIR / f"exp21_openllama_eval_results_{TIMESTAMP}.csv"
-                JSON_OUT = RESEARCH_DIR / f"exp21_openllama_eval_summary_{TIMESTAMP}.json"
+                CSV_OUT = RESEARCH_DIR / f"exp22_qwen7b_eval_results_{TIMESTAMP}.csv"
+                JSON_OUT = RESEARCH_DIR / f"exp22_qwen7b_eval_summary_{TIMESTAMP}.json"
             except Exception as e:
                 print(f"  [Resume] Failed to load checkpoint: {e}. Starting fresh.")
         else:
@@ -640,12 +640,12 @@ def main():
             json.dump(summary, f, indent=2, default=str)
 
     # ── 1. Base Qwen (no fine-tuning, reference point) ──────────────────
-    if not args.skip_base and "base_openllama" not in completed_variants:
-        print("\n[1/4] Base OpenLLaMA (reference — no fine-tuning)")
+    if not args.skip_base and "base_qwen7b" not in completed_variants:
+        print("\n[1/4] Base Qwen (reference — no fine-tuning)")
         base_model, base_tokenizer = load_base_model()
         ppl_base, _ = eval_perplexity(base_model, base_tokenizer, is_gumbel=False)
         base_result = {
-            "variant": "base_openllama",
+            "variant": "base_qwen7b",
             "checkpoint": MODEL_ID,
             "status": "ok",
             "perplexity_wikitext103": round(ppl_base, 4),
@@ -709,12 +709,8 @@ def main():
         del g_model, g_tok
 
     torch.cuda.empty_cache()
-    gc.collect()
 
     # ── Save results ──────────────────────────────────────────────────────────
-    print(f"\n{'='*70}")
-    print("  Saving results...")
-
     # ── Print comparison table ────────────────────────────────────────────────
     print(f"\n{'='*70}")
     print("  SUMMARY TABLE")
@@ -774,7 +770,7 @@ def plot_per_layer_skip_rate(model, tokenizer, checkpoint_path, n_samples=200, d
     ds.set_format("torch")
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False)
 
-    is_token_level = True # Always True for OpenLLaMA token router
+    is_token_level = True # Always True for Qwen token router
     per_layer_skip = torch.zeros(ROUTABLE)
     total_batches  = 0
     model.eval()
@@ -815,7 +811,7 @@ def plot_per_layer_skip_rate(model, tokenizer, checkpoint_path, n_samples=200, d
         ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1.5,
                 f"{pct:.0f}%", ha="center", va="bottom", fontsize=8)
     plt.tight_layout()
-    out_path = RESEARCH_DIR / "exp21_per_layer_skip_rate.png"
+    out_path = RESEARCH_DIR / "exp7_per_layer_skip_rate.png"
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"  Per-layer skip rate → {out_path}")
