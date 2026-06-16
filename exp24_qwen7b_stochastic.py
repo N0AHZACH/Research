@@ -41,7 +41,7 @@ def get_optimal_config():
 
     compute_dtype = torch.float16 if is_turing else torch.bfloat16
     cpu_count = os.cpu_count() or 2
-    nw = 0 if os.name == 'nt' else min(2, cpu_count - 1)
+    nw = 0 if os.name == 'nt' else min(8, (cpu_count or 4) // 4)
     attn = "flash_attention_2" if vram_gb >= 7 else None
     print(f"[HARDWARE] GPU: {gpu_name} | {vram_gb:.1f}GB VRAM | BS={bs}, GA={ga}, 4bit={use_4bit}, dtype={compute_dtype}, workers={nw}")
     return bs, ga, nw, attn, use_4bit, compute_dtype
