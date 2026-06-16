@@ -65,17 +65,18 @@ def get_optimal_config():
 
     # Determine best configuration based on VRAM
     if vram_gb >= 90: # 96GB VRAM
-        bs, ga, use_4bit = 16, 1, False
+        bs, ga = 16, 1
     elif vram_gb >= 70:  # A100 80GB, H100
-        bs, ga, use_4bit = 8, 2, False
+        bs, ga = 8, 2
     elif vram_gb >= 35: # A100 40GB, A6000 48GB
-        bs, ga, use_4bit = 4, 4, False
+        bs, ga = 4, 4
     elif vram_gb >= 22: # RTX 3090/4090 24GB, L4 24GB
-        bs, ga, use_4bit = 2, 8, False
+        bs, ga = 2, 8
     elif vram_gb >= 14: # T4 16GB, V100 16GB
-        bs, ga, use_4bit = 2, 8, True
+        bs, ga = 2, 8
     else: # RTX 4060 8GB, etc.
-        bs, ga, use_4bit = 1, 16, True
+        bs, ga = 1, 16
+    use_4bit = False
 
     compute_dtype = torch.float16 if is_turing else torch.bfloat16
 
@@ -258,11 +259,7 @@ def main():
     # Models: Student (LoRA) + Teacher (Frozen) for KD
     # ==============================================================================
     print(f"\nLoading {MODEL_ID} student (LoRA) ...")
-    if USE_4BIT:
-        q_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=COMPUTE_DTYPE)
-        base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=q_cfg, device_map="cuda", attn_implementation=ATTN_IMPL)
-    else:
-        base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, device_map="cuda", attn_implementation=ATTN_IMPL)
+    base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL).to("cuda")
 
     # We no longer load a separate teacher model to save 6GB VRAM.
     # Instead, we will use model.disable_adapter() during the forward pass!

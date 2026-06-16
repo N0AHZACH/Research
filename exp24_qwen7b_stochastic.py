@@ -33,12 +33,13 @@ def get_optimal_config():
 
     is_turing = 'T4' in gpu_name or 'RTX 20' in gpu_name or 'Turing' in gpu_name
 
-    if vram_gb >= 90: bs, ga, use_4bit = 16, 1, False
-    elif vram_gb >= 70: bs, ga, use_4bit = 8, 2, False
-    elif vram_gb >= 35: bs, ga, use_4bit = 4, 4, False
-    elif vram_gb >= 22: bs, ga, use_4bit = 2, 8, False
-    elif vram_gb >= 14: bs, ga, use_4bit = 2, 8, True
-    else: bs, ga, use_4bit = 1, 16, True
+    if vram_gb >= 90: bs, ga = 16, 1
+    elif vram_gb >= 70: bs, ga = 8, 2
+    elif vram_gb >= 35: bs, ga = 4, 4
+    elif vram_gb >= 22: bs, ga = 2, 8
+    elif vram_gb >= 14: bs, ga = 2, 8
+    else: bs, ga = 1, 16
+    use_4bit = False
 
     compute_dtype = torch.float16 if is_turing else torch.bfloat16
     cpu_count = os.cpu_count() or 2
@@ -98,11 +99,7 @@ def main():
     eval_loader  = DataLoader(RAMDataset(eval_enc),  batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=pin)
 
     print(f"Loading {MODEL_ID}...")
-    if USE_4BIT:
-        q_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=COMPUTE_DTYPE)
-        model = AutoModelForCausalLM.from_pretrained(MODEL_ID, device_map="auto", quantization_config=q_cfg, attn_implementation=ATTN_IMPL)
-    else:
-        model = AutoModelForCausalLM.from_pretrained(MODEL_ID, device_map="auto", torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL)
+    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL).to("cuda")
 
     lora_cfg = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.05, bias="none", task_type=TaskType.CAUSAL_LM)
     model = get_peft_model(model, lora_cfg)
