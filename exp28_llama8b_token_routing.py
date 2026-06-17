@@ -65,15 +65,15 @@ def get_optimal_config():
 
     # Determine best configuration based on VRAM
     if vram_gb >= 90: # 96GB VRAM
-        bs, ga = 16, 1
-    elif vram_gb >= 70:  # A100 80GB, H100
         bs, ga = 8, 2
-    elif vram_gb >= 35: # A100 40GB, A6000 48GB
+    elif vram_gb >= 70:  # A100 80GB, H100
         bs, ga = 4, 4
+    elif vram_gb >= 35: # A100 40GB, A6000 48GB
+        bs, ga = 2, 8
     elif vram_gb >= 22: # RTX 3090/4090 24GB, L4 24GB
-        bs, ga = 2, 8
+        bs, ga = 1, 16
     elif vram_gb >= 14: # T4 16GB, V100 16GB
-        bs, ga = 2, 8
+        bs, ga = 1, 16
     else: # RTX 4060 8GB, etc.
         bs, ga = 1, 16
     use_4bit = False
@@ -324,7 +324,6 @@ def main():
                 model.load_state_dict(adapters_weights, strict=False)
                 
                 del adapters_weights
-                import gc
                 gc.collect()
                 
                 lora_loaded = True
@@ -399,15 +398,23 @@ def main():
         return outputs.logits, outputs.loss, gates
 
     def compute_kd_loss(s_logits, t_logits, T):
-        # kl_div with batchmean only divides by batch size.
-        # We must also divide by the sequence length so it is on the same scale as CE Loss.
-        seq_len = s_logits.size(1)
-        kl = F.kl_div(
-            F.log_softmax(s_logits / T, dim=-1),
-            F.softmax(t_logits  / T, dim=-1),
-            reduction="batchmean",
-        ) * (T ** 2)
-        return kl / seq_len
+        # Chunk KD loss calculation to prevent massive memory spikes during log_softmax
+        s_logits = s_logits.reshape(-1, s_logits.size(-1))
+        t_logits = t_logits.reshape(-1, t_logits.size(-1))
+        
+        chunk_size = 1024
+        kl_sum = 0.0
+        for i in range(0, s_logits.size(0), chunk_size):
+            s_chunk = s_logits[i:i+chunk_size]
+            t_chunk = t_logits[i:i+chunk_size]
+            
+            kl_sum = kl_sum + F.kl_div(
+                F.log_softmax(s_chunk / T, dim=-1),
+                F.softmax(t_chunk / T, dim=-1),
+                reduction="sum",
+            ) * (T ** 2)
+            
+        return kl_sum / s_logits.size(0)
 
     def compute_gate_loss(gates):
         """
@@ -500,7 +507,11 @@ def main():
                                 ).logits
                         kd_loss    = compute_kd_loss(student_logits[:, :-1, :], teacher_logits[:, :-1, :], KD_TEMPERATURE)
                         total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss) / GRAD_ACCUM
+                        del teacher_logits
 
+                    # Free student logits reference early to save VRAM during backward
+                    del student_logits
+                    
                     total_loss.backward()
 
                 except torch.cuda.OutOfMemoryError:
