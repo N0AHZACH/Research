@@ -89,7 +89,7 @@ tokenizer.pad_token = tokenizer.eos_token
 
 def tokenize(batch):
     out = tokenizer(batch["text"], truncation=True, padding="max_length", max_length=MAX_LENGTH)
-    out["labels"] = out["input_ids"].copy()
+    out["labels"] = [[l if m == 1 else -100 for l, m in zip(ids, mask)] for ids, mask in zip(out["input_ids"], out["attention_mask"])]
     return out
 
 train_ds = raw.map(tokenize, batched=True, remove_columns=raw.column_names)
@@ -145,9 +145,11 @@ def gated_forward(model, batch, temperature, hard=True):
     handles = []
     def hook_fn(module, input, output, layer_idx):
         residual = input[0]
-        gate = ctx.gates[:, layer_idx].view(-1, 1, 1).to(output[0].dtype)
-        gated_h = gate * output[0] + (1.0 - gate) * residual
-        return (gated_h, *output[1:])
+        is_tuple = isinstance(output, tuple)
+        out_h = output[0] if is_tuple else output
+        gate = ctx.gates[:, layer_idx].view(-1, 1, 1).to(out_h.dtype)
+        gated_h = gate * out_h + (1.0 - gate) * residual
+        return (gated_h,) + output[1:] if is_tuple else gated_h
 
     for i in range(len(ctx.gates[0])):
         h = model.base_model.model.model.layers[i + ALWAYS_KEEP]
@@ -164,8 +166,9 @@ def compute_kd_loss(s_logits, t_logits, T):
     seq_len = s_logits.size(1)
     return (F.kl_div(F.log_softmax(s_logits/T, dim=-1), F.softmax(t_logits/T, dim=-1), reduction="batchmean") * (T**2)) / seq_len
 
-def train_one_penalty(penalty: float, teacher_model, base_model) -> dict:
+def train_one_penalty(penalty: float, teacher_model) -> dict:
     print(f"\n--- lambda={penalty:.3f} ---")
+    base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda", attn_implementation=ATTN_IMPL)
     lora_cfg = LoraConfig(task_type=TaskType.CAUSAL_LM, r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.05, bias="none")
     model = get_peft_model(base_model, lora_cfg)
     ROUTABLE_LAYERS = len(model.base_model.model.model.layers) - ALWAYS_KEEP
@@ -184,7 +187,6 @@ def train_one_penalty(penalty: float, teacher_model, base_model) -> dict:
         for step, batch in enumerate(tqdm(train_loader, desc=f"L={penalty}")):
             batch = {k: v.to("cuda") for k, v in batch.items() if isinstance(v, torch.Tensor)}
             s_logits, ce_loss, gates = gated_forward(model, batch, current_temp, hard=True)
-            with torch.no_grad(): t_logits = teacher_model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
             
             p_mean = gates.detach().float().mean(); eps = 1e-6
             gate_entropy = -(p_mean * (p_mean + eps).log() + (1 - p_mean) * (1 - p_mean + eps).log())
@@ -196,6 +198,7 @@ def train_one_penalty(penalty: float, teacher_model, base_model) -> dict:
             if global_step < KD_WARMUP_STEPS:
                 total_loss = (ce_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
             else:
+                with torch.no_grad(): t_logits = teacher_model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
                 kd_loss = compute_kd_loss(s_logits[:, :-1, :], t_logits[:, :-1, :], KD_TEMPERATURE)
                 total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
             total_loss.backward()
@@ -220,7 +223,6 @@ def train_one_penalty(penalty: float, teacher_model, base_model) -> dict:
 
 def main():
     print("\n--- FAST PARETO SWEEP ---")
-    base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda", attn_implementation=ATTN_IMPL)
     print("Loading Teacher (8-bit if available)...")
     try:
         quant_config = BitsAndBytesConfig(load_in_8bit=True)
@@ -248,7 +250,7 @@ def main():
 
     results = []
     for p in PENALTIES:
-        r = train_one_penalty(p, teacher_model, base_model)
+        r = train_one_penalty(p, teacher_model)
         results.append(r)
         with open(CSV_FILENAME, "a", newline="") as f:
             csv.writer(f).writerow([r["penalty"], r["val_loss"], r["avg_active_layers"], r["total_layers"], r["skip_ratio"]])

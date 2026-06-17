@@ -324,7 +324,6 @@ def main():
                 model.load_state_dict(adapters_weights, strict=False)
                 
                 del adapters_weights
-                import gc
                 gc.collect()
                 
                 lora_loaded = True
