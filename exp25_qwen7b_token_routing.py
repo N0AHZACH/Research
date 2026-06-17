@@ -398,15 +398,23 @@ def main():
         return outputs.logits, outputs.loss, gates
 
     def compute_kd_loss(s_logits, t_logits, T):
-        # kl_div with batchmean only divides by batch size.
-        # We must also divide by the sequence length so it is on the same scale as CE Loss.
-        seq_len = s_logits.size(1)
-        kl = F.kl_div(
-            F.log_softmax(s_logits / T, dim=-1),
-            F.softmax(t_logits  / T, dim=-1),
-            reduction="batchmean",
-        ) * (T ** 2)
-        return kl / seq_len
+        # Chunk KD loss calculation to prevent massive memory spikes during log_softmax
+        s_logits = s_logits.view(-1, s_logits.size(-1))
+        t_logits = t_logits.view(-1, t_logits.size(-1))
+        
+        chunk_size = 1024
+        kl_sum = 0.0
+        for i in range(0, s_logits.size(0), chunk_size):
+            s_chunk = s_logits[i:i+chunk_size]
+            t_chunk = t_logits[i:i+chunk_size]
+            
+            kl_sum = kl_sum + F.kl_div(
+                F.log_softmax(s_chunk / T, dim=-1),
+                F.softmax(t_chunk / T, dim=-1),
+                reduction="sum",
+            ) * (T ** 2)
+            
+        return kl_sum / s_logits.size(0)
 
     def compute_gate_loss(gates):
         """
@@ -499,6 +507,10 @@ def main():
                                 ).logits
                         kd_loss    = compute_kd_loss(student_logits[:, :-1, :], teacher_logits[:, :-1, :], KD_TEMPERATURE)
                         total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss) / GRAD_ACCUM
+                        
+                        # Free massive logits tensors BEFORE backward pass to save VRAM
+                        del student_logits
+                        del teacher_logits
 
                     total_loss.backward()
 
