@@ -399,8 +399,8 @@ def main():
 
     def compute_kd_loss(s_logits, t_logits, T):
         # Chunk KD loss calculation to prevent massive memory spikes during log_softmax
-        s_logits = s_logits.view(-1, s_logits.size(-1))
-        t_logits = t_logits.view(-1, t_logits.size(-1))
+        s_logits = s_logits.reshape(-1, s_logits.size(-1))
+        t_logits = t_logits.reshape(-1, t_logits.size(-1))
         
         chunk_size = 1024
         kl_sum = 0.0
