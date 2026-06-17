@@ -61,6 +61,11 @@ SAVE_DIR     = f"exp26_llama8b_baseline_output_{TIMESTAMP}"
 def main():
     print(f"\n{'='*70}\n  EXP26: LLAMA3.1-8B FULL-DEPTH BASELINE (32 Layers)\n{'='*70}")
     
+    from huggingface_hub import login
+    import os
+    if "HF_TOKEN" in os.environ:
+        login(token=os.environ["HF_TOKEN"])
+    
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.pad_token = tokenizer.eos_token
 
