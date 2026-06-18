@@ -545,6 +545,10 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
             eval_model = model
             _persistent_hooks = []
 
+        if hasattr(eval_model, "generation_config"):
+            eval_model.generation_config.max_new_tokens = None
+            eval_model.generation_config.max_length = None
+
         task_results = run_lm_eval(
             eval_model, tokenizer,
             tasks=args.tasks,
