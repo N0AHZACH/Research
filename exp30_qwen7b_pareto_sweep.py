@@ -202,8 +202,21 @@ def gated_forward(model, batch, temperature, hard=True):
     return outputs.logits, outputs.loss, gates
 
 def compute_kd_loss(s_logits, t_logits, T, mask):
-    kl = F.kl_div(F.log_softmax(s_logits/T, dim=-1), F.softmax(t_logits/T, dim=-1), reduction="none").sum(dim=-1)
-    return (kl * mask).sum() / mask.sum().clamp(min=1.0) * (T**2)
+    s_logits = s_logits.reshape(-1, s_logits.size(-1))
+    t_logits = t_logits.reshape(-1, t_logits.size(-1))
+    mask = mask.reshape(-1)
+    
+    kl_sum = 0.0
+    chunk_size = 4096
+    for i in range(0, s_logits.size(0), chunk_size):
+        s_chunk = s_logits[i:i+chunk_size]
+        t_chunk = t_logits[i:i+chunk_size]
+        m_chunk = mask[i:i+chunk_size]
+        
+        kl = F.kl_div(F.log_softmax(s_chunk/T, dim=-1), F.softmax(t_chunk/T, dim=-1), reduction="none").sum(dim=-1)
+        kl_sum += (kl * m_chunk).sum()
+        
+    return kl_sum / mask.sum().clamp(min=1.0) * (T**2)
 
 def train_one_penalty(penalty: float, teacher_model) -> dict:
     print(f"\n--- lambda={penalty:.3f} ---")
