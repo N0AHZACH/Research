@@ -203,7 +203,7 @@ def compute_kd_loss(s_logits, t_logits, T, mask):
     mask = mask.reshape(-1)
     
     kl_sum = 0.0
-    chunk_size = 4096
+    chunk_size = 512
     for i in range(0, s_logits.size(0), chunk_size):
         s_chunk = s_logits[i:i+chunk_size]
         t_chunk = t_logits[i:i+chunk_size]
@@ -214,7 +214,7 @@ def compute_kd_loss(s_logits, t_logits, T, mask):
         
     return kl_sum / mask.sum().clamp(min=1.0) * (T**2)
 
-def train_one_penalty(penalty: float, teacher_model) -> dict:
+def train_one_penalty(penalty: float) -> dict:
     print(f"\n--- lambda={penalty:.3f} ---")
     base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL).to("cuda")
     lora_cfg = LoraConfig(task_type=TaskType.CAUSAL_LM, r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.05, bias="none")
@@ -247,8 +247,11 @@ def train_one_penalty(penalty: float, teacher_model) -> dict:
             if global_step < KD_WARMUP_STEPS:
                 total_loss = (ce_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
             else:
-                with torch.no_grad(): t_logits = teacher_model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
+                with model.disable_adapter():
+                    with torch.no_grad(): 
+                        t_logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
                 kd_loss = compute_kd_loss(s_logits[:, :-1, :], t_logits[:, :-1, :], KD_TEMPERATURE, batch["attention_mask"][:, 1:])
+                del t_logits
                 total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
             total_loss.backward()
             if (step + 1) % GRAD_ACCUM == 0:
@@ -272,34 +275,13 @@ def train_one_penalty(penalty: float, teacher_model) -> dict:
 
 def main():
     print("\n--- FAST PARETO SWEEP ---")
-    print("Loading Teacher (8-bit if available)...")
-    try:
-        quant_config = BitsAndBytesConfig(load_in_8bit=True)
-        teacher_model = AutoModelForCausalLM.from_pretrained(
-            MODEL_ID, 
-            quantization_config=quant_config,
-            device_map="cuda", 
-            attn_implementation=ATTN_IMPL
-        )
-    except Exception as e:
-        print(f"[INFO] 8-bit loading skipped ({e}). Using bf16.")
-        teacher_model = AutoModelForCausalLM.from_pretrained(
-            MODEL_ID, 
-            torch_dtype=torch.bfloat16, 
-            device_map="cuda", 
-            attn_implementation=ATTN_IMPL
-        )
-    teacher_model.eval()
-    if ATTN_IMPL == "sdpa" and os.name != "nt":
-        try: teacher_model = torch.compile(teacher_model)
-        except: pass
 
     with open(CSV_FILENAME, "w", newline="") as f:
         csv.writer(f).writerow(["Penalty", "Val Loss", "Avg Active Layers", "Total Layers", "Skip Ratio"])
 
     results = []
     for p in PENALTIES:
-        r = train_one_penalty(p, teacher_model)
+        r = train_one_penalty(p)
         results.append(r)
         with open(CSV_FILENAME, "a", newline="") as f:
             csv.writer(f).writerow([r["penalty"], r["val_loss"], r["avg_active_layers"], r["total_layers"], r["skip_ratio"]])
