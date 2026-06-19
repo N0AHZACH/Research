@@ -31,7 +31,7 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-MODEL_ID     = "Qwen/Qwen2.5-7B"
+MODEL_ID     = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 MAX_LENGTH   = 512
 ALWAYS_KEEP  = 4
 PENALTIES    = [0.005, 0.01, 0.02, 0.05, 0.10, 0.20, 0.40]
@@ -61,12 +61,10 @@ def get_optimal_config():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    if vram_gb >= 80:
-        bs, ga, nw, attn = 16, 1, 0, "sdpa"
-        print(f"[MASSIVE SERVER MODE] VRAM: {vram_gb:.1f}GB | BS: {bs} | GA: {ga} | Workers: {nw}")
-    elif vram_gb >= 45:
-        bs, ga, nw, attn = 16, 1, 0, "sdpa"
-        print(f"[FAST MODE] VRAM: {vram_gb:.1f}GB | BS: {bs} | GA: {ga} | Workers: {nw}")
+    if vram_gb >= 15:
+        # Aggressive Server Mode
+        bs, ga, nw, attn = 10, 1, min(cpu_count // 2, 12), "sdpa"
+        print(f"[FAST MODE] VRAM: {vram_gb:.1f}GB | BS: {bs} | GA: {ga} | Workers: {nw} | 8-bit Teacher: ON")
     else:
         bs, ga, nw, attn = 2, 8, 0, None
         print(f"[DESKTOP MODE] VRAM: {vram_gb:.1f}GB | BS: {bs} | GA: {ga}")

@@ -1,10 +1,6 @@
 """
 exp8_fast_pareto_sweep.py - Aggressive 3-Hour Research Sweep
 
-Optimizations for speed:
-1. 1 Epoch instead of 3 (sufficient for router trend analysis).
-2. 8-bit Quantized Teacher (faster KD passes, lower VRAM).
-3. Batch Size 10 (higher throughput).
 4. torch.compile on both Student and Teacher.
 5. Zero-IO model resets (shares base_model in RAM).
 
@@ -38,7 +34,7 @@ PENALTIES    = [0.005, 0.01, 0.02, 0.05, 0.10, 0.20, 0.40]
 
 TRAIN_SAMPLES    = 10_000
 EVAL_SAMPLES     = 1_000
-EPOCHS           = 1   # Fast Mode
+EPOCHS           = 3
 MAX_EVAL_BATCHES = 100
 
 LR               = 3e-5
@@ -62,10 +58,10 @@ def get_optimal_config():
     torch.backends.cudnn.allow_tf32 = True
 
     if vram_gb >= 80:
-        bs, ga, nw, attn = 16, 1, 0, "sdpa"
+        bs, ga, nw, attn = 24, 1, 8, "sdpa"
         print(f"[MASSIVE SERVER MODE] VRAM: {vram_gb:.1f}GB | BS: {bs} | GA: {ga} | Workers: {nw}")
     elif vram_gb >= 45:
-        bs, ga, nw, attn = 16, 1, 0, "sdpa"
+        bs, ga, nw, attn = 16, 1, 8, "sdpa"
         print(f"[FAST MODE] VRAM: {vram_gb:.1f}GB | BS: {bs} | GA: {ga} | Workers: {nw}")
     else:
         bs, ga, nw, attn = 2, 8, 0, None
@@ -82,8 +78,8 @@ PLOT_FILE    = f"results/exp31_llama8b_pareto_{TIMESTAMP}.png"
 # ---------------------------------------------------------------------------
 # Dataset & Router Logic (Identical to exp6/exp8)
 # ---------------------------------------------------------------------------
-raw      = load_dataset("wikitext", "wikitext-103-raw-v1", split="train")
-eval_raw = load_dataset("wikitext", "wikitext-103-raw-v1", split="validation")
+raw      = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="train")
+eval_raw = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="validation")
 raw      = raw.filter(lambda x: len(x["text"]) > 100).select(range(TRAIN_SAMPLES))
 eval_raw = eval_raw.filter(lambda x: len(x["text"]) > 100).select(range(EVAL_SAMPLES))
 
@@ -114,67 +110,92 @@ pin = torch.cuda.is_available() and (os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC
 train_loader = DataLoader(RAMDataset(train_ds), batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=pin)
 eval_loader  = DataLoader(RAMDataset(eval_ds),  batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=pin)
 
-class GumbelRouter(nn.Module):
+class TokenLevelGumbelRouter(nn.Module):
     def __init__(self, hidden_size: int, num_layers: int):
         super().__init__()
-        self.net = nn.Sequential(nn.Linear(hidden_size, hidden_size // 2), nn.GELU(), nn.Linear(hidden_size // 2, num_layers))
-    def forward(self, pooled_h: torch.Tensor, temperature: float, hard: bool = True):
-        logits = self.net(pooled_h.float())
+        self.net = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.GELU(),
+            nn.Linear(hidden_size // 2, hidden_size // 4),
+            nn.GELU(),
+            nn.Linear(hidden_size // 4, num_layers),
+        )
+        nn.init.constant_(self.net[-1].bias, -1.5)
+
+    def forward(self, h_seq: torch.Tensor, temperature: float, hard: bool = True):
+        h_seq  = h_seq.float()
+        logits = self.net(h_seq)
         logits_2c = torch.stack([torch.zeros_like(logits), logits], dim=-1)
-        return F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)[..., 1].to(pooled_h.dtype)
+        soft   = F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)
+        return soft[..., 1].to(h_seq.dtype)
 
 class StopForwardException(Exception): pass
 
-class GatedForwardContext:
+class TokenGatedForwardContext:
     def __init__(self):
-        self.gates, self.handles, self.captured_h = None, [], None
+        self.gates = None
+        self.handles = []
+        self.captured_h_seq = None
+
+    def __enter__(self): return self
+    def __exit__(self, *args): self.remove_hooks()
     def remove_hooks(self):
         for h in self.handles: h.remove()
         self.handles.clear()
-    def install_early_stop_hook(self, layer):
+
+    def install_capture_hook(self, layer):
         def hook(module, input, output):
             hidden_state = output[0] if isinstance(output, tuple) else output
-            self.captured_h = hidden_state.detach().float().mean(dim=1)
-            raise StopForwardException()
+            self.captured_h_seq = hidden_state.detach().float()
         self.handles.append(layer.register_forward_hook(hook))
+
+    def install_gate_hooks(self, layers, gates):
+        self.gates = gates
+        for i, layer in enumerate(layers):
+            idx = i
+            def hook(module, input, output, layer_i=idx):
+                residual = input[0]
+                is_tuple = isinstance(output, tuple)
+                h = output[0] if is_tuple else output
+                gate = self.gates[:, :, layer_i].unsqueeze(-1).to(h.dtype)
+                gated_h = gate * h + (1.0 - gate) * residual
+                return (gated_h,) + output[1:] if is_tuple else gated_h
+            self.handles.append(layer.register_forward_hook(hook))
 
 def gated_forward(model, batch, temperature, hard=True):
     input_ids = batch["input_ids"]
     attention_mask = batch["attention_mask"]
-    labels = batch["labels"]
-    ctx = GatedForwardContext()
-    base = model.base_model.model.model
+    labels = batch.get("labels", None)
     
-    ctx.install_early_stop_hook(base.layers[ALWAYS_KEEP - 1])
+    transformer = model.base_model.model.model
+    all_layers = transformer.layers
+
+    ctx = TokenGatedForwardContext()
+    
+    def early_stop_hook(module, input, output):
+        hidden_state = output[0] if isinstance(output, tuple) else output
+        ctx.captured_h_seq = hidden_state.detach().float()
+        raise StopForwardException()
+
+    handle = all_layers[ALWAYS_KEEP - 1].register_forward_hook(early_stop_hook)
     try:
         with torch.no_grad():
             _ = model(input_ids=input_ids, attention_mask=attention_mask)
     except StopForwardException:
         pass
     finally:
-        ctx.remove_hooks()
-        
-    ctx.gates = model.router(ctx.captured_h.to("cuda"), temperature, hard)
+        handle.remove()
 
-    handles = []
-    def hook_fn(module, input, output, layer_idx):
-        residual = input[0]
-        is_tuple = isinstance(output, tuple)
-        out_h = output[0] if is_tuple else output
-        gate = ctx.gates[:, layer_idx].view(-1, 1, 1).to(out_h.dtype)
-        gated_h = gate * out_h + (1.0 - gate) * residual
-        return (gated_h,) + output[1:] if is_tuple else gated_h
+    h_seq = ctx.captured_h_seq.to("cuda")
+    gates = model.router(h_seq, temperature=temperature, hard=hard)
 
-    for i in range(len(ctx.gates[0])):
-        h = model.base_model.model.model.layers[i + ALWAYS_KEEP]
-        handles.append(h.register_forward_hook(lambda m, a, o, idx=i: hook_fn(m, a, o, idx)))
-
+    ctx.install_gate_hooks(all_layers[ALWAYS_KEEP:], gates)
     try:
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
     finally:
-        for h in handles: h.remove()
-        
-    return outputs.logits, outputs.loss, ctx.gates
+        ctx.remove_hooks()
+
+    return outputs.logits, outputs.loss, gates
 
 def compute_kd_loss(s_logits, t_logits, T, mask):
     kl = F.kl_div(F.log_softmax(s_logits/T, dim=-1), F.softmax(t_logits/T, dim=-1), reduction="none").sum(dim=-1)
@@ -186,7 +207,7 @@ def train_one_penalty(penalty: float, teacher_model) -> dict:
     lora_cfg = LoraConfig(task_type=TaskType.CAUSAL_LM, r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.05, bias="none")
     model = get_peft_model(base_model, lora_cfg)
     ROUTABLE_LAYERS = len(model.base_model.model.model.layers) - ALWAYS_KEEP
-    model.router = GumbelRouter(model.config.hidden_size, ROUTABLE_LAYERS).to("cuda")
+    model.router = TokenLevelGumbelRouter(model.config.hidden_size, ROUTABLE_LAYERS).to("cuda")
     
     if ATTN_IMPL == "sdpa" and os.name != "nt":
         try: model = torch.compile(model)
@@ -206,7 +227,8 @@ def train_one_penalty(penalty: float, teacher_model) -> dict:
             gate_entropy = -(p_mean * (p_mean + eps).log() + (1 - p_mean) * (1 - p_mean + eps).log())
             # Scale gate loss by CE to maintain constant pressure (Fix from exp6)
             ce_scale = ce_loss.detach().float().clamp(min=0.5)
-            gate_loss = gates.float().mean() * penalty * ce_scale
+            per_layer_activity = gates.float().mean(dim=(0, 1))
+            gate_loss = per_layer_activity.sum() * penalty * ce_scale
             entropy_bonus = GATE_ENTROPY_BETA * gate_entropy * ce_scale
 
             if global_step < KD_WARMUP_STEPS:
@@ -228,7 +250,7 @@ def train_one_penalty(penalty: float, teacher_model) -> dict:
             v_batch = {k: v.to("cuda") for k, v in v_batch.items() if isinstance(v, torch.Tensor)}
             _, v_ce, v_gates = gated_forward(model, v_batch, current_temp, hard=True)
             total_val_loss += v_ce.item()
-            layer_counts.append(v_gates.float().mean(dim=0).sum().item() + ALWAYS_KEEP)
+            layer_counts.append(v_gates.float().mean(dim=(0, 1)).sum().item() + ALWAYS_KEEP)
     
     val_loss = total_val_loss / min(MAX_EVAL_BATCHES, len(eval_loader))
     avg_layers = sum(layer_counts) / len(layer_counts)
