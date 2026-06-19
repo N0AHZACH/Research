@@ -522,9 +522,13 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
             def _capture_hook(module, input, output):
                 h = output[0] if isinstance(output, tuple) else output
                 if _is_token:
-                    _captured_state["h"] = h.detach().float()
+                    h_float = h.detach().float()
                 else:
-                    _captured_state["h"] = h.detach().float().mean(dim=1)
+                    h_float = h.detach().float().mean(dim=1)
+                _captured_state["h"] = h_float
+                h_device = h_float.to(next(_router_ref.parameters()).device)
+                with torch.no_grad():
+                    _captured_state["gates"] = _router_ref(h_device, temperature=0.5, hard=True)
             _persistent_hooks.append(
                 all_layers[ALWAYS_KEEP - 1].register_forward_hook(_capture_hook)
             )
@@ -533,11 +537,9 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
             for i, layer in enumerate(all_layers[ALWAYS_KEEP:]):
                 layer_i = i
                 def _gate_hook(module, input, output, li=layer_i):
-                    if "h" not in _captured_state:
+                    if "gates" not in _captured_state:
                         return output  # safety: first pass hasn't captured yet
-                    h = _captured_state["h"].to(next(_router_ref.parameters()).device)
-                    with torch.no_grad():
-                        gates = _router_ref(h, temperature=0.5, hard=True)
+                    gates = _captured_state["gates"]
                     residual = input[0]
                     is_tuple = isinstance(output, tuple)
                     out_h = output[0] if is_tuple else output

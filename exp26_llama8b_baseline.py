@@ -33,17 +33,17 @@ def get_optimal_config():
 
     is_turing = 'T4' in gpu_name or 'RTX 20' in gpu_name or 'Turing' in gpu_name
 
-    if vram_gb >= 90: bs, ga = 16, 1
-    elif vram_gb >= 70: bs, ga = 8, 2
-    elif vram_gb >= 35: bs, ga = 4, 4
-    elif vram_gb >= 22: bs, ga = 2, 8
-    elif vram_gb >= 14: bs, ga = 2, 8
+    if vram_gb >= 80: bs, ga = 16, 1
+    elif vram_gb >= 45: bs, ga = 16, 1  # 48GB cards like RTX 6000 Pro
+    elif vram_gb >= 35: bs, ga = 8, 2   # 40GB cards like A100
+    elif vram_gb >= 22: bs, ga = 4, 4   # 24GB cards like RTX 4090
+    elif vram_gb >= 14: bs, ga = 2, 8   # 16GB cards like T4
     else: bs, ga = 1, 16
     use_4bit = False
 
     compute_dtype = torch.float16 if is_turing else torch.bfloat16
     cpu_count = os.cpu_count() or 2
-    nw = min(24, (cpu_count or 4) // 2)
+    nw = 0  # RAMDataset is fully in-memory; multiprocessing adds massive IPC overhead on Windows
     try:
         import flash_attn
         attn = "flash_attention_2" if vram_gb >= 7 else None
@@ -80,7 +80,7 @@ def main():
         o["labels"] = o["input_ids"].copy()
         return o
 
-    tok_procs = min(os.cpu_count() or 1, 32)
+    tok_procs = 1 if os.name == "nt" else min(os.cpu_count() or 1, 32)
     train_enc = raw.map(tokenize_fn, batched=True, remove_columns=raw.column_names, num_proc=tok_procs)
     eval_enc  = eval_raw.map(tokenize_fn, batched=True, remove_columns=eval_raw.column_names, num_proc=tok_procs)
     train_enc.set_format("torch")
@@ -147,6 +147,7 @@ def main():
                     if oom_count >= MAX_OOM_RETRIES:
                         print("[OOM] Too many OOM errors. Saving checkpoint and exiting.")
                         model.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
+                        tokenizer.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
                         return
                     continue
 
@@ -181,20 +182,24 @@ def main():
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
                         model.save_pretrained(os.path.join(SAVE_DIR, "best_model"))
+                        tokenizer.save_pretrained(os.path.join(SAVE_DIR, "best_model"))
                     model.train()
     except KeyboardInterrupt:
         print("\n[INTERRUPT] Training interrupted by user. Saving checkpoint...")
         model.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
+        tokenizer.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
         print("Checkpoint saved successfully. Exiting.")
         return
     except Exception as e:
         print(f"\n[ERROR] Unexpected error: {e}. Saving emergency checkpoint...")
         model.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
+        tokenizer.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
         raise
 
     print("\nSaving final model checkpoint...")
     os.makedirs(os.path.join(SAVE_DIR, "final_model"), exist_ok=True)
     model.save_pretrained(os.path.join(SAVE_DIR, "final_model"))
+    tokenizer.save_pretrained(os.path.join(SAVE_DIR, "final_model"))
 
 if __name__ == "__main__":
     main()

@@ -92,13 +92,24 @@ def tokenize(batch):
     out["labels"] = [[l if m == 1 else -100 for l, m in zip(ids, mask)] for ids, mask in zip(out["input_ids"], out["attention_mask"])]
     return out
 
-train_ds = raw.map(tokenize, batched=True, remove_columns=raw.column_names)
-eval_ds  = eval_raw.map(tokenize, batched=True, remove_columns=eval_raw.column_names)
+tok_procs = min(os.cpu_count() or 1, 32)
+train_ds = raw.map(tokenize, batched=True, remove_columns=raw.column_names, num_proc=tok_procs)
+eval_ds  = eval_raw.map(tokenize, batched=True, remove_columns=eval_raw.column_names, num_proc=tok_procs)
 train_ds.set_format("torch")
 eval_ds.set_format("torch")
 
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True)
-eval_loader  = DataLoader(eval_ds,  batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
+class RAMDataset(torch.utils.data.Dataset):
+    def __init__(self, enc):
+        self.input_ids = enc["input_ids"] if isinstance(enc["input_ids"], torch.Tensor) else torch.stack(list(enc["input_ids"]))
+        self.attention_mask = enc["attention_mask"] if isinstance(enc["attention_mask"], torch.Tensor) else torch.stack(list(enc["attention_mask"]))
+        self.labels = enc["labels"] if isinstance(enc["labels"], torch.Tensor) else torch.stack(list(enc["labels"]))
+    def __len__(self): return len(self.input_ids)
+    def __getitem__(self, idx):
+        return {"input_ids": self.input_ids[idx], "attention_mask": self.attention_mask[idx], "labels": self.labels[idx]}
+
+pin = torch.cuda.is_available() and (os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') / (1024**3) > 12 if hasattr(os, 'sysconf') else True)
+train_loader = DataLoader(RAMDataset(train_ds), batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=pin)
+eval_loader  = DataLoader(RAMDataset(eval_ds),  batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=pin)
 
 class GumbelRouter(nn.Module):
     def __init__(self, hidden_size: int, num_layers: int):
@@ -162,13 +173,13 @@ def gated_forward(model, batch, temperature, hard=True):
         
     return outputs.logits, outputs.loss, ctx.gates
 
-def compute_kd_loss(s_logits, t_logits, T):
-    seq_len = s_logits.size(1)
-    return (F.kl_div(F.log_softmax(s_logits/T, dim=-1), F.softmax(t_logits/T, dim=-1), reduction="batchmean") * (T**2)) / seq_len
+def compute_kd_loss(s_logits, t_logits, T, mask):
+    kl = F.kl_div(F.log_softmax(s_logits/T, dim=-1), F.softmax(t_logits/T, dim=-1), reduction="none").sum(dim=-1)
+    return (kl * mask).sum() / mask.sum().clamp(min=1.0) * (T**2)
 
 def train_one_penalty(penalty: float, teacher_model) -> dict:
     print(f"\n--- lambda={penalty:.3f} ---")
-    base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda", attn_implementation=ATTN_IMPL)
+    base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL).to("cuda")
     lora_cfg = LoraConfig(task_type=TaskType.CAUSAL_LM, r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.05, bias="none")
     model = get_peft_model(base_model, lora_cfg)
     ROUTABLE_LAYERS = len(model.base_model.model.model.layers) - ALWAYS_KEEP
@@ -199,7 +210,7 @@ def train_one_penalty(penalty: float, teacher_model) -> dict:
                 total_loss = (ce_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
             else:
                 with torch.no_grad(): t_logits = teacher_model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
-                kd_loss = compute_kd_loss(s_logits[:, :-1, :], t_logits[:, :-1, :], KD_TEMPERATURE)
+                kd_loss = compute_kd_loss(s_logits[:, :-1, :], t_logits[:, :-1, :], KD_TEMPERATURE, batch["attention_mask"][:, 1:])
                 total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
             total_loss.backward()
             if (step + 1) % GRAD_ACCUM == 0:
@@ -219,7 +230,7 @@ def train_one_penalty(penalty: float, teacher_model) -> dict:
     val_loss = total_val_loss / min(MAX_EVAL_BATCHES, len(eval_loader))
     avg_layers = sum(layer_counts) / len(layer_counts)
     res = {"penalty": penalty, "val_loss": val_loss, "avg_active_layers": avg_layers, "total_layers": ROUTABLE_LAYERS + ALWAYS_KEEP, "skip_ratio": 1.0 - (avg_layers/(ROUTABLE_LAYERS+ALWAYS_KEEP))}
-    del model; torch.cuda.empty_cache(); return res
+    import gc; del model, optimizer, scheduler, base_model; gc.collect(); torch.cuda.empty_cache(); return res
 
 def main():
     print("\n--- FAST PARETO SWEEP ---")

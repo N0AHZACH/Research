@@ -64,16 +64,16 @@ def get_optimal_config():
     is_turing = 'T4' in gpu_name or 'RTX 20' in gpu_name or 'Turing' in gpu_name
 
     # Determine best configuration based on VRAM
-    if vram_gb >= 90: # 96GB VRAM
+    if vram_gb >= 80: # 80GB VRAM
+        bs, ga = 16, 1
+    elif vram_gb >= 45:  # 48GB cards like RTX 6000 Pro
+        bs, ga = 16, 1
+    elif vram_gb >= 35: # A100 40GB
         bs, ga = 8, 2
-    elif vram_gb >= 70:  # A100 80GB, H100
-        bs, ga = 4, 4
-    elif vram_gb >= 35: # A100 40GB, A6000 48GB
-        bs, ga = 2, 8
     elif vram_gb >= 22: # RTX 3090/4090 24GB, L4 24GB
-        bs, ga = 1, 16
+        bs, ga = 4, 4
     elif vram_gb >= 14: # T4 16GB, V100 16GB
-        bs, ga = 1, 16
+        bs, ga = 2, 8
     else: # RTX 4060 8GB, etc.
         bs, ga = 1, 16
     use_4bit = False
@@ -82,7 +82,7 @@ def get_optimal_config():
 
     # Limit workers based on available CPU cores (GCP T4 often has only 2 vCPUs)
     cpu_count = os.cpu_count() or 2
-    nw = min(24, (cpu_count or 4) // 2)
+    nw = 0  # RAMDataset is fully in-memory; multiprocessing adds massive IPC overhead on Windows
     try:
         import flash_attn
         attn = "flash_attention_2" if vram_gb >= 7 else None
@@ -224,7 +224,7 @@ def main():
         return out
 
     # Use available CPU cores for tokenization (capped for low-core cloud VMs)
-    tok_procs = min(os.cpu_count() or 1, 32)
+    tok_procs = 1 if os.name == "nt" else min(os.cpu_count() or 1, 32)
     train_enc = raw.map(tokenize, batched=True, remove_columns=raw.column_names, num_proc=tok_procs)
     eval_enc  = eval_raw.map(tokenize, batched=True, remove_columns=eval_raw.column_names, num_proc=tok_procs)
     train_enc.set_format("torch")
@@ -397,24 +397,28 @@ def main():
 
         return outputs.logits, outputs.loss, gates
 
-    def compute_kd_loss(s_logits, t_logits, T):
+    def compute_kd_loss(s_logits, t_logits, T, mask):
         # Chunk KD loss calculation to prevent massive memory spikes during log_softmax
         s_logits = s_logits.reshape(-1, s_logits.size(-1))
         t_logits = t_logits.reshape(-1, t_logits.size(-1))
+        mask = mask.reshape(-1)
         
         chunk_size = 1024
         kl_sum = 0.0
         for i in range(0, s_logits.size(0), chunk_size):
             s_chunk = s_logits[i:i+chunk_size]
             t_chunk = t_logits[i:i+chunk_size]
+            m_chunk = mask[i:i+chunk_size].float()
             
-            kl_sum = kl_sum + F.kl_div(
+            kl = F.kl_div(
                 F.log_softmax(s_chunk / T, dim=-1),
                 F.softmax(t_chunk / T, dim=-1),
-                reduction="sum",
-            ) * (T ** 2)
+                reduction="none",
+            ).sum(dim=-1)
             
-        return kl_sum / s_logits.size(0)
+            kl_sum = kl_sum + (kl * m_chunk).sum() * (T ** 2)
+            
+        return kl_sum / mask.sum().clamp(min=1.0)
 
     def compute_gate_loss(gates):
         """
@@ -442,6 +446,7 @@ def main():
         checkpoint_dir = os.path.join(save_dir, "checkpoint_latest")
         os.makedirs(checkpoint_dir, exist_ok=True)
         model.save_pretrained(checkpoint_dir)
+        tokenizer.save_pretrained(checkpoint_dir)
         torch.save(model.router.state_dict(), os.path.join(checkpoint_dir, "router_weights.pt"))
         checkpoint_states = {
             "epoch": epoch,
@@ -505,7 +510,7 @@ def main():
                                     input_ids=batch["input_ids"],
                                     attention_mask=batch.get("attention_mask"),
                                 ).logits
-                        kd_loss    = compute_kd_loss(student_logits[:, :-1, :], teacher_logits[:, :-1, :], KD_TEMPERATURE)
+                        kd_loss    = compute_kd_loss(student_logits[:, :-1, :], teacher_logits[:, :-1, :], KD_TEMPERATURE, batch.get("attention_mask")[:, 1:])
                         total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss) / GRAD_ACCUM
                         del teacher_logits
 
