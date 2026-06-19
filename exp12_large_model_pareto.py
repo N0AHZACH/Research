@@ -88,9 +88,7 @@ def get_optimal_config():
 BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL, USE_4BIT, COMPUTE_DTYPE = get_optimal_config()
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-os.makedirs("results", exist_ok=True)
-os.makedirs("checkpoints", exist_ok=True)
-CSV_FILENAME = f"results/exp12_large_model_pareto_{TIMESTAMP}.csv"
+CSV_FILENAME = f"exp12_large_model_pareto_{TIMESTAMP}.csv"
 PLOT_FILE    = f"exp12_large_model_pareto_{TIMESTAMP}.png"
 
 # ---------------------------------------------------------------------------

@@ -99,13 +99,13 @@ def _latest_checkpoint(pattern: str) -> Optional[Path]:
     """
     # Try all typical subdirectories saved by the training scripts
     for subdir in ["best_model", "final_model", "checkpoint_latest"]:
-        candidates = sorted((RESEARCH_DIR / "checkpoints").glob(f"{pattern}/{subdir}"), reverse=True)
+        candidates = sorted(RESEARCH_DIR.glob(f"{pattern}/{subdir}"), reverse=True)
         for c in candidates:
             if (c / "adapter_config.json").exists():
                 return c
     
     # Second try: the run dir itself (no best_model subdir)
-    dirs = sorted((RESEARCH_DIR / "checkpoints").glob(pattern), reverse=True)
+    dirs = sorted(RESEARCH_DIR.glob(pattern), reverse=True)
     for d in dirs:
         if (d / "adapter_config.json").exists():
             return d
@@ -119,8 +119,8 @@ TOKEN_PATH      = (Path(args.token_path) if args.token_path
                    else _latest_checkpoint("exp18_openllama_output_*"))
 
 TIMESTAMP   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_OUT     = RESEARCH_DIR / "results" / f"exp21_openllama_eval_results_{TIMESTAMP}.csv"
-JSON_OUT    = RESEARCH_DIR / "results" / f"exp21_openllama_eval_summary_{TIMESTAMP}.json"
+CSV_OUT     = RESEARCH_DIR / f"exp21_openllama_eval_results_{TIMESTAMP}.csv"
+JSON_OUT    = RESEARCH_DIR / f"exp21_openllama_eval_summary_{TIMESTAMP}.json"
 
 # ---------------------------------------------------------------------------
 # Check lm-eval is installed
@@ -599,7 +599,7 @@ def main():
 
     if args.resume:
         import glob
-        json_files = glob.glob(str(RESEARCH_DIR / "results" / "exp21_openllama_eval_summary_*.json"))
+        json_files = glob.glob(str(RESEARCH_DIR / "exp21_openllama_eval_summary_*.json"))
         if json_files:
             latest_json = max(json_files, key=os.path.getmtime)
             print(f"  [Resume] Found previous checkpoint: {latest_json}")

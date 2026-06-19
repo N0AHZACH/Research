@@ -94,10 +94,8 @@ def get_optimal_config():
 BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL = get_optimal_config()
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-os.makedirs("results", exist_ok=True)
-os.makedirs("checkpoints", exist_ok=True)
-CSV_FILENAME = f"results/exp6_gumbel_metrics_{TIMESTAMP}.csv"
-SAVE_DIR     = f"checkpoints/exp6_gumbel_output_{TIMESTAMP}"
+CSV_FILENAME = f"exp6_gumbel_metrics_{TIMESTAMP}.csv"
+SAVE_DIR     = f"exp6_gumbel_output_{TIMESTAMP}"
 
 # ==============================================================================
 # Fix 4: Dataset - Wikitext-103

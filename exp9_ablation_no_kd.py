@@ -51,10 +51,8 @@ EVAL_EVERY_STEPS = 100
 LOG_EVERY_STEPS  = 20
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-os.makedirs("results", exist_ok=True)
-os.makedirs("checkpoints", exist_ok=True)
-CSV_FILENAME = f"results/exp9_ablation_no_kd_{TIMESTAMP}.csv"
-SAVE_DIR     = f"checkpoints/exp9_ablation_no_kd_output_{TIMESTAMP}"
+CSV_FILENAME = f"exp9_ablation_no_kd_{TIMESTAMP}.csv"
+SAVE_DIR     = f"exp9_ablation_no_kd_output_{TIMESTAMP}"
 
 # ==============================================================================
 # Fix 4: Dataset - Wikitext-103

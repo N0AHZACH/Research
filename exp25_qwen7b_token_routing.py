@@ -94,10 +94,8 @@ def get_optimal_config():
 BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL, USE_4BIT, COMPUTE_DTYPE = get_optimal_config()
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-os.makedirs("results", exist_ok=True)
-os.makedirs("checkpoints", exist_ok=True)
-CSV_FILENAME = f"results/exp25_qwen7b_token_routing_{TIMESTAMP}.csv"
-SAVE_DIR     = f"checkpoints/exp25_qwen7b_token_output_{TIMESTAMP}"
+CSV_FILENAME = f"exp25_qwen7b_token_routing_{TIMESTAMP}.csv"
+SAVE_DIR     = f"exp25_qwen7b_token_output_{TIMESTAMP}"
 
 # ==============================================================================
 # TOKEN-LEVEL Gumbel-Softmax Router (v2 - stronger init bias)

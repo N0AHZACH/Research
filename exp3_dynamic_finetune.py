@@ -62,7 +62,7 @@ ALWAYS_KEEP     = 4          # first N layers always active
 COMPUTE_PENALTY = 0.05       # REINFORCE penalty per active routed layer
 
 TIMESTAMP       = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_FILENAME = f"results/exp3_dynamic_metrics_{TIMESTAMP}.csv"
+CSV_FILENAME    = f"exp3_dynamic_metrics_{TIMESTAMP}.csv"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tokeniser & Dataset

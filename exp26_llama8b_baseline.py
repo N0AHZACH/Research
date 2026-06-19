@@ -55,10 +55,8 @@ def get_optimal_config():
 BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL, USE_4BIT, COMPUTE_DTYPE = get_optimal_config()
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-os.makedirs("results", exist_ok=True)
-os.makedirs("checkpoints", exist_ok=True)
-CSV_FILENAME = f"results/exp26_llama8b_baseline_metrics_{TIMESTAMP}.csv"
-SAVE_DIR     = f"checkpoints/exp26_llama8b_baseline_output_{TIMESTAMP}"
+CSV_FILENAME = f"exp26_llama8b_baseline_metrics_{TIMESTAMP}.csv"
+SAVE_DIR     = f"exp26_llama8b_baseline_output_{TIMESTAMP}"
 
 def main():
     print(f"\n{'='*70}\n  EXP26: LLAMA3.1-8B FULL-DEPTH BASELINE (32 Layers)\n{'='*70}")

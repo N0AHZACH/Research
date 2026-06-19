@@ -49,10 +49,8 @@ EVAL_EVERY_STEPS = 100
 LOG_EVERY_STEPS  = 20
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-os.makedirs("results", exist_ok=True)
-os.makedirs("checkpoints", exist_ok=True)
-CSV_FILENAME = f"results/exp2_stochastic_metrics_{TIMESTAMP}.csv"
-SAVE_DIR     = f"checkpoints/exp2_stochastic_output_{TIMESTAMP}"
+CSV_FILENAME = f"exp2_stochastic_metrics_{TIMESTAMP}.csv"
+SAVE_DIR     = f"exp2_stochastic_output_{TIMESTAMP}"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Dataset  (Wikitext-103 — same as exp1/exp6)

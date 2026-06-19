@@ -119,8 +119,8 @@ TOKEN_PATH      = (Path(args.token_path) if args.token_path
                    else (_latest_checkpoint("exp10_token_output_*") or _latest_checkpoint("exp9_token_output_*")))
 
 TIMESTAMP   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_OUT     = RESEARCH_DIR / "results" / f"exp7_eval_results_{TIMESTAMP}.csv"
-JSON_OUT    = RESEARCH_DIR / "results" / f"exp7_eval_summary_{TIMESTAMP}.json"
+CSV_OUT     = RESEARCH_DIR / f"exp7_eval_results_{TIMESTAMP}.csv"
+JSON_OUT    = RESEARCH_DIR / f"exp7_eval_summary_{TIMESTAMP}.json"
 
 # ---------------------------------------------------------------------------
 # Check lm-eval is installed
