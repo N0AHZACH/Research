@@ -27,7 +27,7 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-MODEL_ID     = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+MODEL_ID     = "Qwen/Qwen2.5-7B"
 MAX_LENGTH   = 512
 ALWAYS_KEEP  = 4
 PENALTIES    = [0.005, 0.01, 0.02, 0.05, 0.10, 0.20, 0.40]
