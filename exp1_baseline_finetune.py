@@ -38,8 +38,10 @@ EVAL_EVERY_STEPS = 100
 LOG_EVERY_STEPS  = 20
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_FILENAME = f"exp1_baseline_metrics_{TIMESTAMP}.csv"
-SAVE_DIR     = f"exp1_baseline_output_{TIMESTAMP}"
+os.makedirs("results", exist_ok=True)
+os.makedirs("checkpoints", exist_ok=True)
+CSV_FILENAME = f"results/exp1_baseline_metrics_{TIMESTAMP}.csv"
+SAVE_DIR     = f"checkpoints/exp1_baseline_output_{TIMESTAMP}"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Dataset  (Wikitext-103 — same as exp6)

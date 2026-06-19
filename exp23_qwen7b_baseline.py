@@ -55,8 +55,10 @@ def get_optimal_config():
 BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL, USE_4BIT, COMPUTE_DTYPE = get_optimal_config()
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_FILENAME = f"exp23_qwen7b_baseline_metrics_{TIMESTAMP}.csv"
-SAVE_DIR     = f"exp23_qwen7b_baseline_output_{TIMESTAMP}"
+os.makedirs("results", exist_ok=True)
+os.makedirs("checkpoints", exist_ok=True)
+CSV_FILENAME = f"results/exp23_qwen7b_baseline_metrics_{TIMESTAMP}.csv"
+SAVE_DIR     = f"checkpoints/exp23_qwen7b_baseline_output_{TIMESTAMP}"
 
 def main():
     print(f"\n{'='*70}\n  EXP23: QWEN2.5-7B BASELINE (FULL DEPT)\n{'='*70}")

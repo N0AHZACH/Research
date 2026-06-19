@@ -71,7 +71,9 @@ def get_optimal_config():
 BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL = get_optimal_config()
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_FILENAME = f"exp8_turbo_pareto_{TIMESTAMP}.csv"
+os.makedirs("results", exist_ok=True)
+os.makedirs("checkpoints", exist_ok=True)
+CSV_FILENAME = f"results/exp8_turbo_pareto_{TIMESTAMP}.csv"
 PLOT_FILE    = f"exp8_turbo_pareto_{TIMESTAMP}.png"
 
 # ---------------------------------------------------------------------------

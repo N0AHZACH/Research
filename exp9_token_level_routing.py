@@ -73,8 +73,10 @@ def get_optimal_config():
 BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL = get_optimal_config()
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_FILENAME = f"exp9_token_level_routing_{TIMESTAMP}.csv"
-SAVE_DIR     = f"exp9_token_output_{TIMESTAMP}"
+os.makedirs("results", exist_ok=True)
+os.makedirs("checkpoints", exist_ok=True)
+CSV_FILENAME = f"results/exp9_token_level_routing_{TIMESTAMP}.csv"
+SAVE_DIR     = f"checkpoints/exp9_token_output_{TIMESTAMP}"
 
 def main():
     import argparse

@@ -55,8 +55,10 @@ def get_optimal_config():
 BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL, USE_4BIT, COMPUTE_DTYPE = get_optimal_config()
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_FILENAME = f"exp27_llama8b_stochastic_metrics_{TIMESTAMP}.csv"
-SAVE_DIR     = f"exp27_llama8b_stochastic_output_{TIMESTAMP}"
+os.makedirs("results", exist_ok=True)
+os.makedirs("checkpoints", exist_ok=True)
+CSV_FILENAME = f"results/exp27_llama8b_stochastic_metrics_{TIMESTAMP}.csv"
+SAVE_DIR     = f"checkpoints/exp27_llama8b_stochastic_output_{TIMESTAMP}"
 
 def main():
     print(f"\n{'='*70}\n  EXP27: LLAMA3.1-8B FULL-DEPTH STOCHASTIC (32 Layers)\n{'='*70}")
