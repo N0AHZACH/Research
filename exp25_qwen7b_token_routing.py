@@ -122,7 +122,9 @@ class TokenLevelGumbelRouter(nn.Module):
         )
         # Moderate negative bias: start gates slightly below 50/50
         # -1.5 gives ~18% initial gate probability (sigmoid(-1.5)≈0.18)
-        nn.init.constant_(self.net[-1].bias, -1.5)
+        last_layer = self.net[-1]
+        if isinstance(last_layer, nn.Linear):
+            nn.init.constant_(last_layer.bias, -1.5)  # type: ignore
 
     def forward(self, h_seq: torch.Tensor, temperature: float, hard: bool = True):
         h_seq  = h_seq.float()                                            # precision for Gumbel
@@ -163,6 +165,7 @@ class TokenGatedForwardContext:
                 h = output[0] if is_tuple else output
                 
                 # Gate for this specific layer: [B, S] → [B, S, 1] for broadcasting
+                assert self.gates is not None
                 gate = self.gates[:, :, layer_i].unsqueeze(-1).to(h.dtype)
                 
                 gated_h = gate * h + (1.0 - gate) * residual
@@ -260,7 +263,7 @@ def main():
     # Models: Student (LoRA) + Teacher (Frozen) for KD
     # ==============================================================================
     print(f"\nLoading {MODEL_ID} student (LoRA) ...")
-    base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL).to("cuda")
+    base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL).to("cuda")  # type: ignore
     base_model.config.use_cache = False  # CRITICAL: Prevent hidden KV cache memory leaks across forward passes
 
     # We no longer load a separate teacher model to save 6GB VRAM.
@@ -281,7 +284,8 @@ def main():
 
 
 
-    model.router = TokenLevelGumbelRouter(model.config.hidden_size, ROUTABLE_LAYERS).to("cuda")
+    hidden_size = int(getattr(model.config, "hidden_size"))
+    model.router = TokenLevelGumbelRouter(hidden_size, ROUTABLE_LAYERS).to("cuda")
     for p in model.router.parameters():
         p.requires_grad = True
 
@@ -389,8 +393,9 @@ def main():
         finally:
             handle.remove()
 
+        assert ctx.captured_h_seq is not None
         h_seq = ctx.captured_h_seq.to("cuda")                             # [B, S, H]
-        gates = model.router(h_seq, temperature=temperature, hard=hard)   # [B, S, L]
+        gates = model.router(h_seq, temperature=temperature, hard=hard)   # type: ignore # [B, S, L]
 
         ctx.install_gate_hooks(all_layers[ALWAYS_KEEP:], gates)
         try:
@@ -450,7 +455,7 @@ def main():
         os.makedirs(checkpoint_dir, exist_ok=True)
         model.save_pretrained(checkpoint_dir)
         tokenizer.save_pretrained(checkpoint_dir)
-        torch.save(model.router.state_dict(), os.path.join(checkpoint_dir, "router_weights.pt"))
+        torch.save(model.router.state_dict(), os.path.join(checkpoint_dir, "router_weights.pt"))  # type: ignore
         checkpoint_states = {
             "epoch": epoch,
             "step": step,
@@ -513,7 +518,7 @@ def main():
                                     input_ids=batch["input_ids"],
                                     attention_mask=batch.get("attention_mask"),
                                 ).logits
-                        kd_loss    = compute_kd_loss(student_logits[:, :-1, :], teacher_logits[:, :-1, :], KD_TEMPERATURE, batch.get("attention_mask")[:, 1:])
+                        kd_loss    = compute_kd_loss(student_logits[:, :-1, :], teacher_logits[:, :-1, :], KD_TEMPERATURE, batch["attention_mask"][:, 1:])
                         total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss) / GRAD_ACCUM
                         
                         # Free massive logits tensors BEFORE backward pass to save VRAM
@@ -575,7 +580,7 @@ def main():
                                 os.makedirs(os.path.join(save_dir, "best_model"), exist_ok=True)
                                 model.save_pretrained(os.path.join(save_dir, "best_model"))
                                 tokenizer.save_pretrained(os.path.join(save_dir, "best_model"))
-                                torch.save(model.router.state_dict(), os.path.join(save_dir, "best_model", "router_weights.pt"))
+                                torch.save(model.router.state_dict(), os.path.join(save_dir, "best_model", "router_weights.pt"))  # type: ignore
 
                             # Save latest resume checkpoint
                             save_checkpoint(epoch, step, global_step, best_val_loss, current_temp)
