@@ -313,7 +313,7 @@ def train_one_penalty(penalty: float) -> dict:
     
     base_model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID, 
-        torch_dtype=COMPUTE_DTYPE, 
+        dtype=COMPUTE_DTYPE, 
         attn_implementation=ATTN_IMPL
     ).to("cuda")
     base_model.config.use_cache = False  # CRITICAL: Prevent hidden KV cache memory leaks across forward passes
