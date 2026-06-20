@@ -35,7 +35,7 @@ LR               = 3e-5
 WEIGHT_DECAY     = 0.01
 
 ALWAYS_KEEP      = 4
-COMPUTE_PENALTY  = 0.02   # Drastically reduced to match Llama's successful schedule
+COMPUTE_PENALTY  = 0.05   # Mathematically optimal penalty found via exp30 Pareto sweep
 TARGET_SKIP      = 0.40   # Target: ~60% active layers
 TARGET_PENALTY   = 0.5    # Reduced attractor to match new loss scale
 GUMBEL_TEMP      = 1.0
@@ -55,7 +55,7 @@ def get_optimal_config():
     if not torch.cuda.is_available():
         return 2, 8, 0, None, True, torch.float32
 
-    vram_gb = sum(torch.cuda.get_device_properties(i).total_memory for i in range(torch.cuda.device_count())) / (1024**3)
+    vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
     gpu_name = torch.cuda.get_device_name(0)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -65,9 +65,9 @@ def get_optimal_config():
 
     # Determine best configuration based on VRAM
     if vram_gb >= 80: # 80GB VRAM
-        bs, ga = 16, 1
+        bs, ga = 8, 2
     elif vram_gb >= 45:  # 48GB cards like RTX 6000 Pro
-        bs, ga = 16, 1
+        bs, ga = 8, 2
     elif vram_gb >= 35: # A100 40GB
         bs, ga = 8, 2
     elif vram_gb >= 22: # RTX 3090/4090 24GB, L4 24GB
@@ -260,6 +260,7 @@ def main():
     # ==============================================================================
     print(f"\nLoading {MODEL_ID} student (LoRA) ...")
     base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL).to("cuda")
+    base_model.config.use_cache = False  # CRITICAL: Prevent hidden KV cache memory leaks across forward passes
 
     # We no longer load a separate teacher model to save 6GB VRAM.
     # Instead, we will use model.disable_adapter() during the forward pass!
@@ -283,8 +284,9 @@ def main():
     for p in model.router.parameters():
         p.requires_grad = True
 
+    optimizer_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        itertools.chain(model.parameters(), model.router.parameters()),
+        optimizer_params,
         lr=LR, weight_decay=WEIGHT_DECAY,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -532,11 +534,15 @@ def main():
                     continue
 
                 if (step + 1) % GRAD_ACCUM == 0 or (step + 1) == len(train_loader):
-                    torch.nn.utils.clip_grad_norm_(itertools.chain(model.parameters(), model.router.parameters()), 1.0)
+                    torch.nn.utils.clip_grad_norm_(optimizer_params, 1.0)
                     optimizer.step()
                     scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
                     global_step += 1
+                    
+                    if global_step % 50 == 0:
+                        gc.collect()
+                        torch.cuda.empty_cache()
 
                     if global_step % LOG_EVERY_STEPS == 0:
                         avg_layers = gates.detach().float().mean(dim=(0, 1)).sum().item() + ALWAYS_KEEP
