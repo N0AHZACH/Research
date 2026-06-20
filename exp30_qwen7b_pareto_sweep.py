@@ -92,8 +92,10 @@ def get_optimal_config():
     # Determine best configuration based on single-GPU VRAM
     if vram_gb >= 80:    # 80GB+ VRAM on a SINGLE GPU (e.g. A100/H100 80GB)
         bs, ga = 16, 1
-    elif vram_gb >= 45:  # 48GB cards
-        bs, ga = 16, 1
+    elif vram_gb >= 45:  # 48GB cards (e.g. RTX 6000 Ada)
+        # Reduced from BS=16 -> 8 because KD graph accumulation spikes heavily on step 3-4.
+        # GA=2 maintains the mathematical effective batch size of 16.
+        bs, ga = 8, 2
     elif vram_gb >= 35:  # A100 40GB
         bs, ga = 8, 2
     elif vram_gb >= 22:  # RTX 3090/4090 24GB
@@ -327,10 +329,8 @@ def train_one_penalty(penalty: float) -> dict:
         p.requires_grad = True
 
     if ATTN_IMPL == "sdpa" and os.name != "nt":
-        try:
-            model = torch.compile(model)
-        except Exception as e:
-            print(f"Skipping torch.compile due to error: {e}")
+        # Disabling torch.compile. It causes massive memory explosion on steps 2-5 during graph capture.
+        pass
 
     optimizer = torch.optim.AdamW(
         itertools.chain(model.parameters(), model.router.parameters()), 
