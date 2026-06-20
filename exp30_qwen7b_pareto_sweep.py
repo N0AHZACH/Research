@@ -91,11 +91,12 @@ def get_optimal_config():
 
     # Determine best configuration based on single-GPU VRAM
     if vram_gb >= 80:    # 80GB+ VRAM on a SINGLE GPU (e.g. A100/H100 80GB)
-        # User explicitly requested 625 iterations per epoch
-        bs, ga = 16, 1
+        # BS=16 causes a hard OOM at step 51 when the KD teacher pass begins.
+        # We must use BS=4, GA=4 to fit the 151k vocab logits in memory.
+        bs, ga = 4, 4
     elif vram_gb >= 45:  # 48GB cards (e.g. RTX 6000 Ada)
-        # User explicitly requested 625 iterations per epoch
-        bs, ga = 16, 1
+        # We must use BS=4, GA=4 to fit the 151k vocab logits in memory.
+        bs, ga = 4, 4
     elif vram_gb >= 35:  # A100 40GB
         bs, ga = 8, 2
     elif vram_gb >= 22:  # RTX 3090/4090 24GB
@@ -336,8 +337,10 @@ def train_one_penalty(penalty: float) -> dict:
         # Disabling torch.compile. It causes massive memory explosion on steps 2-5 during graph capture.
         pass
 
+    # Filter out duplicate parameters (model.router is already in model.parameters())
+    optimizer_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        itertools.chain(model.parameters(), model.router.parameters()), 
+        optimizer_params, 
         lr=LR, 
         weight_decay=WEIGHT_DECAY
     )
