@@ -8,6 +8,7 @@ Target: Complete 7-point Pareto sweep in ~3 hours on RTX 4000.
 """
 
 import os
+import gc
 import itertools
 import csv
 import datetime
@@ -58,10 +59,11 @@ def get_optimal_config():
     torch.backends.cudnn.allow_tf32 = True
 
     if vram_gb >= 80:
-        bs, ga, nw, attn = 16, 1, 8, "sdpa"
+        # Llama-8B at BS=18 will definitely OOM during KD phase. Reverted to BS=8, GA=2 like exp30.
+        bs, ga, nw, attn = 8, 2, 8, "sdpa"
         print(f"[MASSIVE SERVER MODE] VRAM: {vram_gb:.1f}GB | BS: {bs} | GA: {ga} | Workers: {nw}")
     elif vram_gb >= 45:
-        bs, ga, nw, attn = 16, 1, 8, "sdpa"
+        bs, ga, nw, attn = 8, 2, 8, "sdpa"
         print(f"[FAST MODE] VRAM: {vram_gb:.1f}GB | BS: {bs} | GA: {ga} | Workers: {nw}")
     else:
         bs, ga, nw, attn = 2, 8, 0, None
@@ -217,6 +219,7 @@ def compute_kd_loss(s_logits, t_logits, T, mask):
 def train_one_penalty(penalty: float) -> dict:
     print(f"\n--- lambda={penalty:.3f} ---")
     base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL).to("cuda")
+    base_model.config.use_cache = False  # CRITICAL: Prevent hidden KV cache memory leaks across forward passes
     lora_cfg = LoraConfig(task_type=TaskType.CAUSAL_LM, r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.05, bias="none")
     model = get_peft_model(base_model, lora_cfg)
     ROUTABLE_LAYERS = len(model.base_model.model.model.layers) - ALWAYS_KEEP
@@ -234,29 +237,49 @@ def train_one_penalty(penalty: float) -> dict:
         model.train()
         for step, batch in enumerate(tqdm(train_loader, desc=f"L={penalty}")):
             batch = {k: v.to("cuda") for k, v in batch.items() if isinstance(v, torch.Tensor)}
-            s_logits, ce_loss, gates = gated_forward(model, batch, current_temp, hard=True)
-            
-            p_mean = gates.detach().float().mean(); eps = 1e-6
-            gate_entropy = -(p_mean * (p_mean + eps).log() + (1 - p_mean) * (1 - p_mean + eps).log())
-            # Scale gate loss by CE to maintain constant pressure (Fix from exp6)
-            ce_scale = ce_loss.detach().float().clamp(min=0.5)
-            per_layer_activity = gates.float().mean(dim=(0, 1))
-            gate_loss = per_layer_activity.sum() * penalty * ce_scale
-            entropy_bonus = GATE_ENTROPY_BETA * gate_entropy * ce_scale
-
-            if global_step < KD_WARMUP_STEPS:
-                total_loss = (ce_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
-            else:
-                with model.disable_adapter():
-                    with torch.no_grad(): 
-                        t_logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
-                kd_loss = compute_kd_loss(s_logits[:, :-1, :], t_logits[:, :-1, :], KD_TEMPERATURE, batch["attention_mask"][:, 1:])
-                del t_logits
-                total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
-            total_loss.backward()
-            if (step + 1) % GRAD_ACCUM == 0:
-                torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(model.router.parameters()), 1.0)
-                optimizer.step(); scheduler.step(); optimizer.zero_grad(); global_step += 1
+            try:
+                s_logits, ce_loss, gates = gated_forward(model, batch, current_temp, hard=True)
+                
+                p_mean = gates.detach().float().mean(); eps = 1e-6
+                gate_entropy = -(p_mean * (p_mean + eps).log() + (1 - p_mean) * (1 - p_mean + eps).log())
+                ce_scale = ce_loss.detach().float().clamp(min=0.5)
+                per_layer_activity = gates.float().mean(dim=(0, 1))
+                gate_loss = per_layer_activity.sum() * penalty * ce_scale
+                entropy_bonus = GATE_ENTROPY_BETA * gate_entropy * ce_scale
+    
+                if global_step < KD_WARMUP_STEPS:
+                    total_loss = (ce_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
+                else:
+                    with model.disable_adapter():
+                        with torch.no_grad():
+                            t_logits = model(input_ids=batch["input_ids"], attention_mask=batch.get("attention_mask")).logits
+                    kd_loss = compute_kd_loss(s_logits[:, :-1, :], t_logits[:, :-1, :], KD_TEMPERATURE, batch.get("attention_mask")[:, 1:])
+                    total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss - entropy_bonus) / GRAD_ACCUM
+    
+                total_loss.backward()
+                
+            except RuntimeError as e:
+                if "OutOfMemoryError" in str(e):
+                    print(f"\n[OOM] CUDA OOM on step {global_step}. NUKING tracebacks and clearing cache...")
+                    import traceback; traceback.clear_frames(e.__traceback__)
+                    e = None
+                    del batch
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    continue
+                else:
+                    raise e
+                    
+            if (step + 1) % GRAD_ACCUM == 0 or (step + 1) == len(train_loader):
+                torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(model.router.parameters()), max_norm=1.0)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                global_step += 1
+                
+                if global_step % 50 == 0:
+                    gc.collect()
+                    torch.cuda.empty_cache()
         current_temp = max(GUMBEL_TEMP_MIN, current_temp * TEMP_ANNEAL_RATE)
 
     model.eval(); total_val_loss, layer_counts = 0.0, []
