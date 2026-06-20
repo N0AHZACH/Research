@@ -105,10 +105,11 @@ def get_optimal_config():
     compute_dtype = torch.float16 if is_turing else torch.bfloat16
     cpu_count = os.cpu_count() or 2
     
-    # CRITICAL WIN: Because you have 180GB RAM, RAMDataset pre-loads the entire dataset into memory.
-    # On Windows, setting nw > 0 uses 'spawn', which would duplicate the 180GB memory footprint per worker!
-    # Keeping nw=0 ensures zero-overhead direct RAM access, which is mathematically optimal here.
-    nw = 0
+    # LINUX GCP OPTIMIZATION: On Linux, PyTorch uses 'fork' for multiprocessing.
+    # This means memory is shared copy-on-write, so we can safely use multiple workers
+    # to asynchronously pre-fetch batches from the 180GB RAM pool without duplicating memory.
+    # With 45 vCPUs, 16 workers will ensure the 96GB GPU is fed at absolute maximum bandwidth.
+    nw = 16 if os.name != "nt" else 0
 
     try:
         import flash_attn
