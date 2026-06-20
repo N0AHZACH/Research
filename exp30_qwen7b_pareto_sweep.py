@@ -91,13 +91,11 @@ def get_optimal_config():
 
     # Determine best configuration based on single-GPU VRAM
     if vram_gb >= 80:    # 80GB+ VRAM on a SINGLE GPU (e.g. A100/H100 80GB)
-        # Qwen2.5's 151k vocab makes logit tensors massive (BS×512×151936×2 = 1.2GB per logit set).
-        # BS=8 causes OOM cascades at epoch 3 step ~614 from cumulative allocator fragmentation.
-        # BS=4, GA=4 halves per-step peak VRAM while preserving effective BS=16.
-        bs, ga = 4, 4
+        # User explicitly requested 625 iterations per epoch
+        bs, ga = 16, 1
     elif vram_gb >= 45:  # 48GB cards (e.g. RTX 6000 Ada)
-        # Same rationale: gated_forward (2 passes) + KD teacher (3rd pass) at BS=8 fragments memory.
-        bs, ga = 4, 4
+        # User explicitly requested 625 iterations per epoch
+        bs, ga = 16, 1
     elif vram_gb >= 35:  # A100 40GB
         bs, ga = 8, 2
     elif vram_gb >= 22:  # RTX 3090/4090 24GB
