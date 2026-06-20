@@ -179,6 +179,8 @@ class TokenGatedForwardContext:
         for h in self.handles: 
             h.remove()
         self.handles.clear()
+        self.gates = None
+        self.captured_h_seq = None
 
     def install_gate_hooks(self, layers, gates):
         self.gates = gates
@@ -314,6 +316,7 @@ def train_one_penalty(penalty: float) -> dict:
         torch_dtype=COMPUTE_DTYPE, 
         attn_implementation=ATTN_IMPL
     ).to("cuda")
+    base_model.config.use_cache = False  # CRITICAL: Prevent hidden KV cache memory leaks across forward passes
     
     lora_cfg = LoraConfig(
         task_type=TaskType.CAUSAL_LM, 
@@ -370,6 +373,11 @@ def train_one_penalty(penalty: float) -> dict:
 
                 if global_step < KD_WARMUP_STEPS:
                     total_loss = (ce_loss + gate_loss) / GRAD_ACCUM
+                    total_loss.backward()
+                    
+                    # Aggressive cleanup of graphs
+                    del s_logits, ce_loss, gates, total_loss, gate_loss, per_layer_activity
+                    
                 else:
                     with torch.no_grad():
                         with model.disable_adapter():
@@ -385,11 +393,10 @@ def train_one_penalty(penalty: float) -> dict:
                         batch.get("attention_mask")[:, 1:]
                     )
                     total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss) / GRAD_ACCUM
+                    total_loss.backward()
                     
-                    del t_logits
-                
-                total_loss.backward()
-                del s_logits
+                    # Aggressive cleanup of graphs
+                    del s_logits, ce_loss, gates, total_loss, gate_loss, per_layer_activity, t_logits, kd_loss
                 
             except torch.cuda.OutOfMemoryError as e:
                 print(f"\n[OOM] CUDA OOM on step {step}. NUKING tracebacks and clearing cache...")
@@ -398,6 +405,7 @@ def train_one_penalty(penalty: float) -> dict:
                 import traceback
                 traceback.clear_frames(e.__traceback__)
                 e.__traceback__ = None
+                del e  # Force PyTorch to let go of the exception object immediately
                 
                 # Clear all heavy tensors from locals
                 if 's_logits' in locals(): del s_logits
