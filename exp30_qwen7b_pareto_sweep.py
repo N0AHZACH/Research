@@ -87,9 +87,10 @@ def get_optimal_config():
 
     is_turing = 'T4' in gpu_name or 'RTX 20' in gpu_name or 'Turing' in gpu_name
 
-    # Determine best configuration based on VRAM (aiming for effective BS ~ 16)
-    if vram_gb >= 80:    # 80GB VRAM (A100/H100)
-        bs, ga = 16, 1
+    # Determine best configuration based on VRAM
+    if vram_gb >= 80:    # 96GB VRAM Detected (e.g. A100/H100)
+        # Bumping to BS=32 since you have 96GB. KD requires massive VRAM for logits, but 96GB handles 32 perfectly.
+        bs, ga = 32, 1
     elif vram_gb >= 45:  # 48GB cards
         bs, ga = 16, 1
     elif vram_gb >= 35:  # A100 40GB
@@ -103,7 +104,11 @@ def get_optimal_config():
 
     compute_dtype = torch.float16 if is_turing else torch.bfloat16
     cpu_count = os.cpu_count() or 2
-    nw = 0  # RAMDataset avoids multiprocessing overhead
+    
+    # CRITICAL WIN: Because you have 180GB RAM, RAMDataset pre-loads the entire dataset into memory.
+    # On Windows, setting nw > 0 uses 'spawn', which would duplicate the 180GB memory footprint per worker!
+    # Keeping nw=0 ensures zero-overhead direct RAM access, which is mathematically optimal here.
+    nw = 0
 
     try:
         import flash_attn
@@ -260,7 +265,8 @@ def tokenize(batch):
     out["labels"] = out["input_ids"].copy()
     return out
 
-tok_procs = 1 if os.name == "nt" else min(os.cpu_count() or 1, 32)
+# You have 45 vCPUs. We unlock multiprocessing for tokenization up to 40 cores.
+tok_procs = min(os.cpu_count() or 1, 40)
 train_enc = raw.map(tokenize, batched=True, remove_columns=raw.column_names, num_proc=tok_procs)
 eval_enc  = eval_raw.map(tokenize, batched=True, remove_columns=eval_raw.column_names, num_proc=tok_procs)
 train_enc.set_format("torch")
