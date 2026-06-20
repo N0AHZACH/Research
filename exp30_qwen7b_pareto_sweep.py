@@ -58,7 +58,7 @@ def get_optimal_config():
     torch.backends.cudnn.allow_tf32 = True
 
     if vram_gb >= 80:
-        bs, ga, nw, attn = 16, 1, 8, "sdpa"
+        bs, ga, nw, attn = 48, 1, min(cpu_count, 24), "sdpa"
         print(f"[MASSIVE SERVER MODE] VRAM: {vram_gb:.1f}GB | BS: {bs} | GA: {ga} | Workers: {nw} | 8-bit Teacher: ON")
     elif vram_gb >= 45:
         bs, ga, nw, attn = 16, 1, 8, "sdpa"
@@ -293,7 +293,7 @@ def main():
     # Simple Plotting
     plt.figure(figsize=(8, 5))
     plt.plot([r["skip_ratio"]*100 for r in results], [r["val_loss"] for r in results], "o-", color="#4a90e2")
-    plt.title("Fast Pareto Frontier (1-Epoch)"); plt.xlabel("Skip Ratio (%)"); plt.ylabel("Val Loss")
+    plt.title("Fast Pareto Frontier (3-Epoch)"); plt.xlabel("Skip Ratio (%)"); plt.ylabel("Val Loss")
     plt.grid(True); plt.savefig(PLOT_FILE); plt.close()
     print(f"Sweep complete. CSV: {CSV_FILENAME}")
 
