@@ -76,7 +76,9 @@ def get_optimal_config():
     if not torch.cuda.is_available():
         return 2, 8, 0, None, torch.float32
 
-    vram_gb = sum(torch.cuda.get_device_properties(i).total_memory for i in range(torch.cuda.device_count())) / (1024**3)
+    # Check VRAM of cuda:0 specifically, because model.to("cuda") only uses one GPU.
+    # If we sum() across 4x 24GB GPUs, it thinks we have 96GB, but cuda:0 only has 24GB!
+    vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
     gpu_name = torch.cuda.get_device_name(0)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -87,10 +89,9 @@ def get_optimal_config():
 
     is_turing = 'T4' in gpu_name or 'RTX 20' in gpu_name or 'Turing' in gpu_name
 
-    # Determine best configuration based on VRAM
-    if vram_gb >= 80:    # 96GB VRAM Detected (e.g. A100/H100)
-        # Bumping to BS=32 since you have 96GB. KD requires massive VRAM for logits, but 96GB handles 32 perfectly.
-        bs, ga = 32, 1
+    # Determine best configuration based on single-GPU VRAM
+    if vram_gb >= 80:    # 80GB+ VRAM on a SINGLE GPU (e.g. A100/H100 80GB)
+        bs, ga = 16, 1
     elif vram_gb >= 45:  # 48GB cards
         bs, ga = 16, 1
     elif vram_gb >= 35:  # A100 40GB
@@ -389,6 +390,14 @@ def train_one_penalty(penalty: float) -> dict:
                 
             except torch.cuda.OutOfMemoryError:
                 print(f"\n[OOM] CUDA OOM on step {step}. Clearing cache and skipping batch...")
+                # Clear all heavy tensors from locals so the traceback doesn't hold them in memory
+                if 's_logits' in locals(): del s_logits
+                if 't_logits' in locals(): del t_logits
+                if 'ce_loss' in locals(): del ce_loss
+                if 'gates' in locals(): del gates
+                if 'total_loss' in locals(): del total_loss
+                if 'batch' in locals(): del batch
+                
                 optimizer.zero_grad(set_to_none=True)
                 gc.collect()
                 torch.cuda.empty_cache()
