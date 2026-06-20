@@ -91,7 +91,9 @@ def get_optimal_config():
 
     # Determine best configuration based on single-GPU VRAM
     if vram_gb >= 80:    # 80GB+ VRAM on a SINGLE GPU (e.g. A100/H100 80GB)
-        bs, ga = 16, 1
+        # Even on 96GB, Qwen2.5's 151k vocab size + PyTorch fragmentation kills BS=16 around step 200.
+        # BS=8, GA=2 guarantees total stability while maintaining effective BS=16.
+        bs, ga = 8, 2
     elif vram_gb >= 45:  # 48GB cards (e.g. RTX 6000 Ada)
         # Reduced from BS=16 -> 8 because KD graph accumulation spikes heavily on step 3-4.
         # GA=2 maintains the mathematical effective batch size of 16.
@@ -234,7 +236,8 @@ def compute_kd_loss(s_logits, t_logits, T, mask):
     t_logits = t_logits.reshape(-1, t_logits.size(-1))
     mask = mask.reshape(-1)
     
-    chunk_size = 1024
+    # Reduced from 1024 -> 256 to prevent PyTorch allocator fragmentation from large contiguous blocks
+    chunk_size = 256
     kl_sum = 0.0
     for i in range(0, s_logits.size(0), chunk_size):
         s_chunk = s_logits[i:i+chunk_size]
@@ -388,14 +391,21 @@ def train_one_penalty(penalty: float) -> dict:
                 total_loss.backward()
                 del s_logits
                 
-            except torch.cuda.OutOfMemoryError:
-                print(f"\n[OOM] CUDA OOM on step {step}. Clearing cache and skipping batch...")
-                # Clear all heavy tensors from locals so the traceback doesn't hold them in memory
+            except torch.cuda.OutOfMemoryError as e:
+                print(f"\n[OOM] CUDA OOM on step {step}. NUKING tracebacks and clearing cache...")
+                
+                # CRITICAL: Destroy the exception traceback which holds references to local variables!
+                import traceback
+                traceback.clear_frames(e.__traceback__)
+                e.__traceback__ = None
+                
+                # Clear all heavy tensors from locals
                 if 's_logits' in locals(): del s_logits
                 if 't_logits' in locals(): del t_logits
                 if 'ce_loss' in locals(): del ce_loss
                 if 'gates' in locals(): del gates
                 if 'total_loss' in locals(): del total_loss
+                if 'kd_loss' in locals(): del kd_loss
                 if 'batch' in locals(): del batch
                 
                 optimizer.zero_grad(set_to_none=True)
