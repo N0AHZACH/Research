@@ -56,7 +56,7 @@ PENALTIES        = [0.005, 0.01, 0.02, 0.05, 0.10, 0.20, 0.40]
 
 TRAIN_SAMPLES    = 10_000
 EVAL_SAMPLES     = 1_000
-EPOCHS           = 3
+EPOCHS           = 1
 MAX_EVAL_BATCHES = 100
 
 LR               = 3e-5
@@ -579,7 +579,7 @@ def main():
             ha='center'
         )
         
-    plt.title("Qwen2.5-7B Token-Level Routing Pareto Frontier (3-Epoch)", fontsize=14, pad=15)
+    plt.title("Qwen2.5-7B Token-Level Routing Pareto Frontier (1-Epoch)", fontsize=14, pad=15)
     plt.xlabel("Layer Skip Ratio (%)", fontsize=12)
     plt.ylabel("Validation Cross-Entropy Loss", fontsize=12)
     plt.grid(True, linestyle="--", alpha=0.7)
