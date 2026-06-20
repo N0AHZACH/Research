@@ -58,7 +58,7 @@ def get_optimal_config():
     torch.backends.cudnn.allow_tf32 = True
 
     if vram_gb >= 80:
-        bs, ga, nw, attn = 20, 1, 32, "sdpa"
+        bs, ga, nw, attn = 18, 1, 32, "sdpa"
         print(f"[MASSIVE SERVER MODE] VRAM: {vram_gb:.1f}GB | BS: {bs} | GA: {ga} | Workers: {nw} | 8-bit Teacher: ON")
     elif vram_gb >= 45:
         bs, ga, nw, attn = 16, 1, 8, "sdpa"
