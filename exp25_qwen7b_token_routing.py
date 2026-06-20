@@ -64,8 +64,9 @@ def get_optimal_config():
     is_turing = 'T4' in gpu_name or 'RTX 20' in gpu_name or 'Turing' in gpu_name
 
     # Determine best configuration based on VRAM
-    if vram_gb >= 80: # 80GB VRAM
-        bs, ga = 8, 2
+    if vram_gb >= 80: # 80GB VRAM (e.g. 96GB Ada)
+        # Because exp25 uses chunked KD loss, we avoid the 15GB fp32 spike and can safely run BS=16
+        bs, ga = 16, 1
     elif vram_gb >= 45:  # 48GB cards like RTX 6000 Pro
         bs, ga = 8, 2
     elif vram_gb >= 35: # A100 40GB
