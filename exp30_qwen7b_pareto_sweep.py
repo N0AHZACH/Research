@@ -14,10 +14,6 @@ Key features:
 """
 
 import os
-# CRITICAL: Fixes PyTorch contiguous block fragmentation by allowing virtual memory stitching.
-# This single line allows us to run BS=16 without crashing at KD step 51.
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
 import gc
 import csv
 import json
@@ -95,10 +91,11 @@ def get_optimal_config():
 
     # Determine best configuration based on single-GPU VRAM
     if vram_gb >= 80:    # 80GB+ VRAM on a SINGLE GPU (e.g. A100/H100 80GB)
-        # expandable_segments:True allows us to run the true BS=16 without fragmentation OOMs!
-        bs, ga = 16, 1
+        # BS=8 fits VRAM perfectly and runs flawlessly without fragmentation OOMs.
+        # BS=8, GA=2 is the fastest mathematically safe configuration.
+        bs, ga = 8, 2
     elif vram_gb >= 45:  # 48GB cards (e.g. RTX 6000 Ada)
-        # 48GB cannot fit BS=16 even with expandable segments (absolute peak is ~75GB).
+        # Same rationale.
         bs, ga = 8, 2
     elif vram_gb >= 35:  # A100 40GB
         bs, ga = 8, 2
