@@ -91,13 +91,13 @@ def get_optimal_config():
 
     # Determine best configuration based on single-GPU VRAM
     if vram_gb >= 80:    # 80GB+ VRAM on a SINGLE GPU (e.g. A100/H100 80GB)
-        # Even on 96GB, Qwen2.5's 151k vocab size + PyTorch fragmentation kills BS=16 around step 200.
-        # BS=8, GA=2 guarantees total stability while maintaining effective BS=16.
-        bs, ga = 8, 2
+        # Qwen2.5's 151k vocab makes logit tensors massive (BS×512×151936×2 = 1.2GB per logit set).
+        # BS=8 causes OOM cascades at epoch 3 step ~614 from cumulative allocator fragmentation.
+        # BS=4, GA=4 halves per-step peak VRAM while preserving effective BS=16.
+        bs, ga = 4, 4
     elif vram_gb >= 45:  # 48GB cards (e.g. RTX 6000 Ada)
-        # Reduced from BS=16 -> 8 because KD graph accumulation spikes heavily on step 3-4.
-        # GA=2 maintains the mathematical effective batch size of 16.
-        bs, ga = 8, 2
+        # Same rationale: gated_forward (2 passes) + KD teacher (3rd pass) at BS=8 fragments memory.
+        bs, ga = 4, 4
     elif vram_gb >= 35:  # A100 40GB
         bs, ga = 8, 2
     elif vram_gb >= 22:  # RTX 3090/4090 24GB
@@ -371,6 +371,9 @@ def train_one_penalty(penalty: float) -> dict:
                 eps = 1e-8
                 layer_entropy = -(p * torch.log(p + eps) + (1.0 - p) * torch.log(1.0 - p + eps)).mean()
 
+                # Save scalar metrics BEFORE backward/cleanup (gates will be deleted)
+                skip_ratio_val = 1.0 - gates.detach().float().mean().item()
+                
                 if global_step < KD_WARMUP_STEPS:
                     total_loss = (ce_loss + gate_loss) / GRAD_ACCUM
                     total_loss.backward()
@@ -439,18 +442,23 @@ def train_one_penalty(penalty: float) -> dict:
                 global_step += 1
                 
                 if global_step % 10 == 0:
-                    skip_ratio = 1.0 - gates.detach().float().mean().item()
                     epoch_bar.set_postfix({
                         "loss": f"{total_loss_val:.4f}",
-                        "skip": f"{skip_ratio:.1%}",
+                        "skip": f"{skip_ratio_val:.1%}",
                         "entropy": f"{entropy_val:.4f}"
                     })
                     
-                # Proactive Defragmentation: Clear PyTorch caching allocator every 100 steps
-                # This guarantees that long-term memory fragmentation over 1000+ steps cannot occur
-                if global_step % 100 == 0:
+                # Proactive Defragmentation: gc.collect() frees Python-side tensor refs that
+                # empty_cache() alone cannot reclaim. Every 50 steps prevents the fragmentation
+                # cliff that caused OOM cascades at epoch 3 step ~614 with BS=8.
+                if global_step % 50 == 0:
+                    gc.collect()
                     torch.cuda.empty_cache()
 
+        # Full epoch-level defragmentation: reset the CUDA allocator state between epochs
+        # to prevent cross-epoch fragmentation accumulation over 3 epochs × 2500 steps
+        gc.collect()
+        torch.cuda.empty_cache()
         current_temp = max(GUMBEL_TEMP_MIN, current_temp * TEMP_ANNEAL_RATE)
 
     # Evaluation
