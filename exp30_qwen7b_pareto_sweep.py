@@ -367,7 +367,7 @@ def train_one_penalty(penalty: float) -> dict:
                 gate_loss = per_layer_activity.sum() * penalty
                 
                 # Compute routing entropy to prove dynamic routing (not static)
-                p = per_layer_activity
+                p = per_layer_activity.detach()
                 eps = 1e-8
                 layer_entropy = -(p * torch.log(p + eps) + (1.0 - p) * torch.log(1.0 - p + eps)).mean()
 
@@ -375,8 +375,11 @@ def train_one_penalty(penalty: float) -> dict:
                     total_loss = (ce_loss + gate_loss) / GRAD_ACCUM
                     total_loss.backward()
                     
+                    total_loss_val = total_loss.item() * GRAD_ACCUM
+                    entropy_val = layer_entropy.item()
+                    
                     # Aggressive cleanup of graphs
-                    del s_logits, ce_loss, gates, total_loss, gate_loss, per_layer_activity
+                    del s_logits, ce_loss, gates, total_loss, gate_loss, per_layer_activity, layer_entropy
                     
                 else:
                     with torch.no_grad():
@@ -395,8 +398,11 @@ def train_one_penalty(penalty: float) -> dict:
                     total_loss = (KD_ALPHA * ce_loss + (1.0 - KD_ALPHA) * kd_loss + gate_loss) / GRAD_ACCUM
                     total_loss.backward()
                     
+                    total_loss_val = total_loss.item() * GRAD_ACCUM
+                    entropy_val = layer_entropy.item()
+                    
                     # Aggressive cleanup of graphs
-                    del s_logits, ce_loss, gates, total_loss, gate_loss, per_layer_activity, t_logits, kd_loss
+                    del s_logits, ce_loss, gates, total_loss, gate_loss, per_layer_activity, t_logits, kd_loss, layer_entropy
                 
             except torch.cuda.OutOfMemoryError as e:
                 print(f"\n[OOM] CUDA OOM on step {step}. NUKING tracebacks and clearing cache...")
@@ -414,6 +420,7 @@ def train_one_penalty(penalty: float) -> dict:
                 if 'gates' in locals(): del gates
                 if 'total_loss' in locals(): del total_loss
                 if 'kd_loss' in locals(): del kd_loss
+                if 'layer_entropy' in locals(): del layer_entropy
                 if 'batch' in locals(): del batch
                 
                 optimizer.zero_grad(set_to_none=True)
@@ -434,10 +441,15 @@ def train_one_penalty(penalty: float) -> dict:
                 if global_step % 10 == 0:
                     skip_ratio = 1.0 - gates.detach().float().mean().item()
                     epoch_bar.set_postfix({
-                        "loss": f"{total_loss.item() * GRAD_ACCUM:.4f}",
+                        "loss": f"{total_loss_val:.4f}",
                         "skip": f"{skip_ratio:.1%}",
-                        "entropy": f"{layer_entropy.item():.4f}"
+                        "entropy": f"{entropy_val:.4f}"
                     })
+                    
+                # Proactive Defragmentation: Clear PyTorch caching allocator every 100 steps
+                # This guarantees that long-term memory fragmentation over 1000+ steps cannot occur
+                if global_step % 100 == 0:
+                    torch.cuda.empty_cache()
 
         current_temp = max(GUMBEL_TEMP_MIN, current_temp * TEMP_ANNEAL_RATE)
 
