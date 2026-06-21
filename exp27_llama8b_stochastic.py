@@ -100,6 +100,7 @@ def main():
 
     print(f"Loading {MODEL_ID}...")
     model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL).to("cuda")
+    model.config.use_cache = False  # CRITICAL: Prevent hidden KV cache memory leaks across forward passes
 
     lora_cfg = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.05, bias="none", task_type=TaskType.CAUSAL_LM)
     model = get_peft_model(model, lora_cfg)
@@ -148,9 +149,16 @@ def main():
                     outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                     loss = outputs.loss / GRAD_ACCUM
                     loss.backward()
-                except torch.cuda.OutOfMemoryError:
+                except torch.cuda.OutOfMemoryError as e:
                     oom_count += 1
                     print(f"\n[OOM] CUDA OOM (occurrence {oom_count}/{MAX_OOM_RETRIES}). Clearing cache and skipping batch...")
+                    import traceback
+                    traceback.clear_frames(e.__traceback__)
+                    e.__traceback__ = None
+                    del e
+                    if 'outputs' in locals(): del outputs
+                    if 'loss' in locals(): del loss
+                    
                     optimizer.zero_grad()
                     gc.collect()
                     torch.cuda.empty_cache()

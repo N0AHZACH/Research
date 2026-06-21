@@ -10,6 +10,7 @@ EXPERIMENTS = {
             ("exp23_qwen7b_baseline.py", "Baseline LoRA Fine-Tuning"),
             ("exp24_qwen7b_stochastic.py", "Stochastic Depth Dropout Control"),
             ("exp25_qwen7b_token_routing.py", "DLR Token-Level Router Training"),
+            ("exp30_qwen7b_pareto_sweep.py", "Pareto Sweep Strategy"),
         ],
         "eval": [
             ("exp22_qwen7b_eval_harness.py", "Evaluation Suite (MMLU/GSM8K/ARC/PPL)"),
@@ -20,6 +21,7 @@ EXPERIMENTS = {
             ("exp26_llama8b_baseline.py", "Baseline LoRA Fine-Tuning"),
             ("exp27_llama8b_stochastic.py", "Stochastic Depth Dropout Control"),
             ("exp28_llama8b_token_routing.py", "DLR Token-Level Router Training"),
+            ("exp31_llama8b_pareto_sweep.py", "Pareto Sweep Strategy"),
         ],
         "eval": [
             ("exp29_llama8b_eval_harness.py", "Evaluation Suite (MMLU/GSM8K/ARC/PPL)"),

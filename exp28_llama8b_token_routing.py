@@ -260,6 +260,7 @@ def main():
     # ==============================================================================
     print(f"\nLoading {MODEL_ID} student (LoRA) ...")
     base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL).to("cuda")
+    base_model.config.use_cache = False  # CRITICAL: Prevent hidden KV cache memory leaks across forward passes
 
     # We no longer load a separate teacher model to save 6GB VRAM.
     # Instead, we will use model.disable_adapter() during the forward pass!
@@ -403,7 +404,7 @@ def main():
         t_logits = t_logits.reshape(-1, t_logits.size(-1))
         mask = mask.reshape(-1)
         
-        chunk_size = 1024
+        chunk_size = 256  # Reduced from 1024 to prevent PyTorch allocator fragmentation
         kl_sum = 0.0
         for i in range(0, s_logits.size(0), chunk_size):
             s_chunk = s_logits[i:i+chunk_size]
@@ -519,9 +520,21 @@ def main():
                     
                     total_loss.backward()
 
-                except torch.cuda.OutOfMemoryError:
+                except torch.cuda.OutOfMemoryError as e:
                     oom_count += 1
                     print(f"\n[OOM] CUDA OOM on step {step} (occurrence {oom_count}/{MAX_OOM_RETRIES}). Clearing cache and skipping batch...")
+                    import traceback
+                    traceback.clear_frames(e.__traceback__)
+                    e.__traceback__ = None
+                    del e
+                    if 'student_logits' in locals(): del student_logits
+                    if 'teacher_logits' in locals(): del teacher_logits
+                    if 'ce_loss' in locals(): del ce_loss
+                    if 'kd_loss' in locals(): del kd_loss
+                    if 'gate_loss' in locals(): del gate_loss
+                    if 'total_loss' in locals(): del total_loss
+                    if 'gates' in locals(): del gates
+                    
                     optimizer.zero_grad(set_to_none=True)
                     gc.collect()
                     torch.cuda.empty_cache()
