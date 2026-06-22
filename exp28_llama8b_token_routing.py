@@ -1,7 +1,7 @@
 """
-exp11_large_model_routing.py - Phase 4: Scaling to Larger Models
+exp28_llama8b_token_routing.py - Token-Level Routing for Llama-3.1-8B
 
-Validating the DLR framework on OpenLLaMA-3B.
+Validating the DLR framework on Meta-Llama-3.1-8B.
 Auto-detects GPU hardware and configures batch size, quantization, and precision.
 Includes robust checkpointing and CUDA OOM recovery for cloud environments.
 """
@@ -285,8 +285,11 @@ def main():
     for p in model.router.parameters():
         p.requires_grad = True
 
+    # Deduplicate: model.router is already registered on model, so model.parameters()
+    # already includes router params. Chain would double-update them.
+    optimizer_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        itertools.chain(model.parameters(), model.router.parameters()),
+        optimizer_params,
         lr=LR, weight_decay=WEIGHT_DECAY,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
