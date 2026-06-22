@@ -100,6 +100,7 @@ def main():
 
     print(f"Loading {MODEL_ID}...")
     model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL).to("cuda")
+    model.config.use_cache = False  # CRITICAL: Prevent hidden KV cache memory leaks across forward passes
 
     lora_cfg = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.05, bias="none", task_type=TaskType.CAUSAL_LM)
     model = get_peft_model(model, lora_cfg)
@@ -113,9 +114,12 @@ def main():
 
     global_step = 0
     best_val_loss = float("inf")
+    oom_count = 0
+    MAX_OOM_RETRIES = 5
 
     print("\nStarting Training...")
-    for epoch in range(1, EPOCHS + 1):
+    try:
+      for epoch in range(1, EPOCHS + 1):
         model.train()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")
         
@@ -125,9 +129,28 @@ def main():
             attention_mask = batch["attention_mask"].to("cuda")
             labels = batch["labels"].to("cuda")
 
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-            loss = outputs.loss / GRAD_ACCUM
-            loss.backward()
+            try:
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                loss = outputs.loss / GRAD_ACCUM
+                loss.backward()
+            except torch.cuda.OutOfMemoryError as e:
+                oom_count += 1
+                print(f"\n[OOM] CUDA OOM (occurrence {oom_count}/{MAX_OOM_RETRIES}). Clearing cache and skipping batch...")
+                import traceback
+                traceback.clear_frames(e.__traceback__)
+                e.__traceback__ = None
+                del e
+                if 'outputs' in locals(): del outputs
+                if 'loss' in locals(): del loss
+                optimizer.zero_grad()
+                gc.collect()
+                torch.cuda.empty_cache()
+                if oom_count >= MAX_OOM_RETRIES:
+                    print("[OOM] Too many OOM errors. Saving checkpoint and exiting.")
+                    model.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
+                    tokenizer.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
+                    return
+                continue
 
             if global_step % GRAD_ACCUM == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -162,6 +185,17 @@ def main():
                     model.save_pretrained(os.path.join(SAVE_DIR, "best_model"))
                     tokenizer.save_pretrained(os.path.join(SAVE_DIR, "best_model"))
                 model.train()
+    except KeyboardInterrupt:
+        print("\n[INTERRUPT] Training interrupted by user. Saving checkpoint...")
+        model.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
+        tokenizer.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
+        print("Checkpoint saved successfully. Exiting.")
+        return
+    except Exception as e:
+        print(f"\n[ERROR] Unexpected error: {e}. Saving emergency checkpoint...")
+        model.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
+        tokenizer.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
+        raise
 
     print("\nSaving final model checkpoint...")
     os.makedirs(os.path.join(SAVE_DIR, "final_model"), exist_ok=True)

@@ -312,7 +312,7 @@ def train_one_penalty(penalty: float) -> dict:
     
     base_model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID, 
-        dtype=COMPUTE_DTYPE, 
+        torch_dtype=COMPUTE_DTYPE, 
         attn_implementation=ATTN_IMPL
     ).to("cuda")
     base_model.config.use_cache = False  # CRITICAL: Prevent hidden KV cache memory leaks across forward passes
@@ -484,7 +484,9 @@ def train_one_penalty(penalty: float) -> dict:
     perplexity = math.exp(val_loss) if val_loss < 20 else float("inf")
     avg_layers = sum(layer_counts) / len(layer_counts)
     avg_entropy = sum(val_entropies) / len(val_entropies)
-    skip_ratio = 1.0 - (avg_layers / (ROUTABLE_LAYERS + ALWAYS_KEEP))
+    total_layers = len(model.base_model.model.model.layers)
+    routable_layers = total_layers - ALWAYS_KEEP
+    skip_ratio = 1.0 - (avg_layers / total_layers)
     dense_flops_utilization = 1.0 - skip_ratio
     
     res = {
@@ -492,7 +494,7 @@ def train_one_penalty(penalty: float) -> dict:
         "val_loss": val_loss, 
         "perplexity": perplexity,
         "avg_active_layers": avg_layers, 
-        "total_layers": ROUTABLE_LAYERS + ALWAYS_KEEP, 
+        "total_layers": total_layers, 
         "skip_ratio": skip_ratio,
         "dense_flops_utilization": dense_flops_utilization,
         "avg_entropy": avg_entropy
