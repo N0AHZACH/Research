@@ -187,7 +187,8 @@ def load_base_model(device="cuda"):
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL, low_cpu_mem_usage=True, use_safetensors=True
     ).to(device)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    hf_token = os.environ.get("HF_TOKEN")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=hf_token)
     tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
 
@@ -496,7 +497,7 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
             # Reload a fresh copy and merge LoRA — clean GPU state
             print(f"    Reloading fresh merged model for lm-eval...")
             base = AutoModelForCausalLM.from_pretrained(
-                MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL, low_cpu_mem_usage=True, use_safetensors=True
+                MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", low_cpu_mem_usage=True, token=hf_token, use_safetensors=True
             ).to("cuda")
             peft_model = PeftModel.from_pretrained(base, str(checkpoint))
             eval_model = peft_model.merge_and_unload()

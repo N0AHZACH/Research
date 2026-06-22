@@ -215,7 +215,8 @@ def main():
     raw      = raw.filter(lambda x: len(x["text"]) > 100).select(range(TRAIN_SAMPLES))
     eval_raw = eval_raw.filter(lambda x: len(x["text"]) > 100).select(range(EVAL_SAMPLES))
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    hf_token = os.environ.get("HF_TOKEN")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=hf_token)
     tokenizer.pad_token = tokenizer.eos_token
 
     def tokenize(batch):
@@ -259,7 +260,7 @@ def main():
     # Models: Student (LoRA) + Teacher (Frozen) for KD
     # ==============================================================================
     print(f"\nLoading {MODEL_ID} student (LoRA) ...")
-    base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL).to("cuda")
+    base_model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL, token=hf_token).to("cuda")
     base_model.config.use_cache = False  # CRITICAL: Prevent hidden KV cache memory leaks across forward passes
 
     # We no longer load a separate teacher model to save 6GB VRAM.
