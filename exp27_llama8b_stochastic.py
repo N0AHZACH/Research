@@ -110,7 +110,7 @@ def main():
     import random
     def stochastic_hook(module, input, output):
         # Drop ~50% of the time
-        if model.training and random.random() < 0.50:
+        if random.random() < 0.50:
             residual = input[0]
             return (residual,) + output[1:] if isinstance(output, tuple) else residual
         return output
