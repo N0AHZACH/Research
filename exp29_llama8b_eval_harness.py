@@ -90,6 +90,7 @@ args = parser.parse_args()
 # ---------------------------------------------------------------------------
 RESEARCH_DIR = Path(__file__).parent
 MODEL_ID     = "meta-llama/Meta-Llama-3.1-8B"
+hf_token     = os.environ.get("HF_TOKEN")  # defined here so all functions can access it
 
 def _latest_checkpoint(pattern: str) -> Optional[Path]:
     """
@@ -497,7 +498,7 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
             # Reload a fresh copy and merge LoRA — clean GPU state
             print(f"    Reloading fresh merged model for lm-eval...")
             base = AutoModelForCausalLM.from_pretrained(
-                MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", low_cpu_mem_usage=True, token=hf_token, use_safetensors=True
+                MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL, low_cpu_mem_usage=True, token=hf_token, use_safetensors=True
             ).to("cuda")
             peft_model = PeftModel.from_pretrained(base, str(checkpoint))
             eval_model = peft_model.merge_and_unload()
@@ -831,7 +832,7 @@ def plot_per_layer_skip_rate(model, tokenizer, checkpoint_path, n_samples=200, d
         ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1.5,
                 f"{pct:.0f}%", ha="center", va="bottom", fontsize=8)
     plt.tight_layout()
-    out_path = RESEARCH_DIR / "exp21_per_layer_skip_rate.png"
+    out_path = RESEARCH_DIR / "exp29_per_layer_skip_rate.png"
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"  Per-layer skip rate → {out_path}")
