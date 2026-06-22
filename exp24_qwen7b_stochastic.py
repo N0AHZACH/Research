@@ -100,6 +100,7 @@ def main():
 
     print(f"Loading {MODEL_ID}...")
     model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL).to("cuda")
+    model.config.use_cache = False  # CRITICAL: Prevent hidden KV cache memory leaks across forward passes
 
     lora_cfg = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.05, bias="none", task_type=TaskType.CAUSAL_LM)
     model = get_peft_model(model, lora_cfg)

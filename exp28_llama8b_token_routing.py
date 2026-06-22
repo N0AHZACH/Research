@@ -549,7 +549,7 @@ def main():
                     continue
 
                 if (step + 1) % GRAD_ACCUM == 0 or (step + 1) == len(train_loader):
-                    torch.nn.utils.clip_grad_norm_(itertools.chain(model.parameters(), model.router.parameters()), 1.0)
+                    torch.nn.utils.clip_grad_norm_(optimizer_params, 1.0)
                     optimizer.step()
                     scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
