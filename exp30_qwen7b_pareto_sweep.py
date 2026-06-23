@@ -106,7 +106,8 @@ def get_optimal_config():
     else:                # 8GB cards
         bs, ga = 1, 16
 
-    compute_dtype = torch.float16 if is_turing else torch.bfloat16
+    major, _ = torch.cuda.get_device_capability(0)
+    compute_dtype = torch.float16 if major < 8 else torch.bfloat16
     cpu_count = os.cpu_count() or 2
     
     # LINUX GCP OPTIMIZATION: On Linux, PyTorch uses 'fork' for multiprocessing.

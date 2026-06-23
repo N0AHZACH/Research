@@ -43,7 +43,8 @@ def get_optimal_config():
     else: bs, ga = 1, 16
     use_4bit = False
 
-    compute_dtype = torch.float16 if is_turing else torch.bfloat16
+    major, _ = torch.cuda.get_device_capability(0)
+    compute_dtype = torch.float16 if major < 8 else torch.bfloat16
     cpu_count = os.cpu_count() or 2
     nw = 0  # RAMDataset is fully in-memory; multiprocessing adds massive IPC overhead on Windows
     try:
