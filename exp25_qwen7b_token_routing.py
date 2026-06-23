@@ -29,8 +29,8 @@ EVAL_SAMPLES     = 1000
 EPOCHS           = 3
 MAX_EVAL_BATCHES = 100
 
-BATCH_SIZE       = 1   # Reduced for 3B model
-GRAD_ACCUM       = 16  # Increased to maintain effective batch size of 16
+# Batch size and grad accum are auto-configured by get_optimal_config() below.
+# LR / regularization must match exp23 baseline for methodological parity.
 LR               = 3e-5
 WEIGHT_DECAY     = 0.01
 
@@ -129,9 +129,13 @@ class TokenLevelGumbelRouter(nn.Module):
     def forward(self, h_seq: torch.Tensor, temperature: float, hard: bool = True):
         h_seq  = h_seq.float()                                            # precision for Gumbel
         logits = self.net(h_seq)                                          # [B, S, L]
-        logits_2c = torch.stack([torch.zeros_like(logits), logits], dim=-1)  # [B, S, L, 2]
-        soft   = F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)
-        return soft[..., 1].to(h_seq.dtype)                               # [B, S, L]  restore dtype
+        if self.training:
+            logits_2c = torch.stack([torch.zeros_like(logits), logits], dim=-1)  # [B, S, L, 2]
+            soft   = F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)
+            return soft[..., 1].to(h_seq.dtype)                           # [B, S, L]  restore dtype
+        if hard:
+            return (logits > 0).to(h_seq.dtype)
+        return torch.sigmoid(logits).to(h_seq.dtype)
 
 # ==============================================================================
 # Hook-based Token-Level Gated Forward Pass
@@ -197,7 +201,7 @@ def main():
     current_temp = GUMBEL_TEMP
 
     def find_latest_checkpoint():
-        dirs = glob.glob("exp25_qwen7b_token_output_*") + glob.glob("exp25_qwen7b_token_output_*")
+        dirs = glob.glob("exp25_qwen7b_token_output_*")
         valid_checkpoints = []
         for d in dirs:
             ckpt_path = os.path.join(d, "checkpoint_latest", "training_states.pt")
@@ -279,6 +283,7 @@ def main():
     model.print_trainable_parameters()
 
     TOTAL_LAYERS    = len(model.base_model.model.model.layers)
+    assert TOTAL_LAYERS == 28, f"Expected 28 layers for Qwen2.5-7B, got {TOTAL_LAYERS}"
     ROUTABLE_LAYERS = TOTAL_LAYERS - ALWAYS_KEEP
     print(f"  Total layers: {TOTAL_LAYERS} | Always-kept: {ALWAYS_KEEP} | Routable: {ROUTABLE_LAYERS}")
 
@@ -353,6 +358,8 @@ def main():
             states = torch.load(states_path, map_location="cuda")
             start_epoch = states["epoch"]
             start_step = states["step"]
+            if start_step < 0:
+                start_epoch += 1
             global_step = states["global_step"]
             best_val_loss = states["best_val_loss"]
             current_temp = states["current_temp"]
@@ -527,9 +534,19 @@ def main():
 
                     total_loss.backward()
 
-                except torch.cuda.OutOfMemoryError:
+                except torch.cuda.OutOfMemoryError as e:
                     oom_count += 1
                     print(f"\n[OOM] CUDA OOM on step {step} (occurrence {oom_count}/{MAX_OOM_RETRIES}). Clearing cache and skipping batch...")
+                    import traceback
+                    traceback.clear_frames(e.__traceback__)
+                    e.__traceback__ = None
+                    del e
+                    if 'student_logits' in locals(): del student_logits
+                    if 'teacher_logits' in locals(): del teacher_logits
+                    if 'ce_loss' in locals(): del ce_loss
+                    if 'gates' in locals(): del gates
+                    if 'total_loss' in locals(): del total_loss
+                    if 'kd_loss' in locals(): del kd_loss
                     optimizer.zero_grad(set_to_none=True)
                     gc.collect()
                     torch.cuda.empty_cache()
@@ -564,11 +581,14 @@ def main():
                         if global_step % EVAL_EVERY_STEPS == 0:
                             model.eval()
                             total_val_loss, total_active = 0.0, []
+                            # Use near-zero temperature for deterministic routing during evaluation.
+                            # Gumbel noise at current_temp makes val_loss non-reproducible and biased.
+                            EVAL_TEMP = 0.1
                             with torch.no_grad():
                                 for i, val_batch in enumerate(eval_loader):
                                     if i >= MAX_EVAL_BATCHES: break
                                     val_batch = {k: v.to("cuda") for k, v in val_batch.items()}
-                                    _, v_ce, v_gates = gated_forward(model, val_batch, temperature=current_temp, hard=True)
+                                    _, v_ce, v_gates = gated_forward(model, val_batch, temperature=EVAL_TEMP, hard=True)
                                     total_val_loss += v_ce.item()
                                     total_active.append(v_gates.float().mean(dim=(0, 1)).sum().item() + ALWAYS_KEEP)
 

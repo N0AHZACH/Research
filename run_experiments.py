@@ -7,7 +7,7 @@ import argparse
 EXPERIMENTS = {
     "qwen7b": {
         "train": [
-            ("exp23_qwen7b_baseline.py", "Baseline LoRA Fine-Tuning"),
+            # ("exp23_qwen7b_baseline.py", "Baseline LoRA Fine-Tuning"), # Skipped (already generated & saved)
             ("exp24_qwen7b_stochastic.py", "Stochastic Depth Dropout Control"),
             ("exp25_qwen7b_token_routing.py", "DLR Token-Level Router Training"),
             ("exp30_qwen7b_pareto_sweep.py", "Pareto Sweep Strategy"),

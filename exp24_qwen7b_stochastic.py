@@ -26,7 +26,9 @@ def get_optimal_config():
     if not torch.cuda.is_available():
         return 2, 8, 0, None, True, torch.float32
 
-    vram_gb = sum(torch.cuda.get_device_properties(i).total_memory for i in range(torch.cuda.device_count())) / (1024**3)
+    # This script loads the model on cuda:0, so size the batch for that device,
+    # not for aggregate VRAM across all visible GPUs.
+    vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
     gpu_name = torch.cuda.get_device_name(0)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -34,7 +36,7 @@ def get_optimal_config():
     is_turing = 'T4' in gpu_name or 'RTX 20' in gpu_name or 'Turing' in gpu_name
 
     if vram_gb >= 80: bs, ga = 16, 1
-    elif vram_gb >= 45: bs, ga = 16, 1  # 48GB cards like RTX 6000 Pro
+    elif vram_gb >= 45: bs, ga = 8, 2   # 48GB cards like RTX 6000 Pro
     elif vram_gb >= 35: bs, ga = 8, 2   # 40GB cards like A100
     elif vram_gb >= 22: bs, ga = 4, 4   # 24GB cards like RTX 4090
     elif vram_gb >= 14: bs, ga = 2, 8   # 16GB cards like T4
@@ -105,20 +107,37 @@ def main():
     lora_cfg = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.05, bias="none", task_type=TaskType.CAUSAL_LM)
     model = get_peft_model(model, lora_cfg)
     model.print_trainable_parameters()
-    # --- STOCHASTIC DROPOUT ---
+    # --- STOCHASTIC DROPOUT (Training-Only Regularizer) ---
+    # Scientific framing: This is a stochastic depth CONTROL experiment.
+    # The hook drops layers with p=0.50 ONLY during training (expected 16 active layers).
+    # During evaluation, all 28 layers are always active (skip_ratio=0.0).
+    # This correctly measures the regularized model at full inference capacity.
     import random
     def stochastic_hook(module, input, output):
-        # Drop ~50% of the time
-        if random.random() < 0.50:
-            residual = input[0]
-            return (residual,) + output[1:] if isinstance(output, tuple) else residual
-        return output
+        # Drop ~50% of the time during training only
+        residual = input[0]
+        is_tuple = isinstance(output, tuple)
+        layer_out = output[0] if is_tuple else output
+        layer_delta = layer_out - residual
+
+        if model.training:
+            if random.random() < 0.50:
+                res = residual
+            else:
+                res = residual + 2.0 * layer_delta
+        else:
+            res = layer_out
+
+        return (res,) + output[1:] if is_tuple else res
+
 
     handles = []
-    # Qwen has 28 layers. We skip dropping the first 4.
+    # Qwen2.5-7B has 28 layers total. We protect the first 4 (embedding layers).
     num_layers = len(model.base_model.model.model.layers)
+    assert num_layers == 28, f"Expected 28 layers for Qwen2.5-7B, got {num_layers}"
     for i in range(4, num_layers):
         handles.append(model.base_model.model.model.layers[i].register_forward_hook(stochastic_hook))
+    print(f"[STOCHASTIC] Registered dropout hooks on layers 4-{num_layers-1} ({num_layers-4} routable layers, p=0.50 drop rate)")
 
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
@@ -139,7 +158,7 @@ def main():
             model.train()
             pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")
             
-            for batch in pbar:
+            for step, batch in enumerate(pbar):
                 global_step += 1
                 input_ids = batch["input_ids"].to("cuda")
                 attention_mask = batch["attention_mask"].to("cuda")
@@ -149,9 +168,15 @@ def main():
                     outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                     loss = outputs.loss / GRAD_ACCUM
                     loss.backward()
-                except torch.cuda.OutOfMemoryError:
+                except torch.cuda.OutOfMemoryError as e:
                     oom_count += 1
                     print(f"\n[OOM] CUDA OOM (occurrence {oom_count}/{MAX_OOM_RETRIES}). Clearing cache and skipping batch...")
+                    import traceback
+                    traceback.clear_frames(e.__traceback__)
+                    e.__traceback__ = None
+                    del e
+                    if 'outputs' in locals(): del outputs
+                    if 'loss' in locals(): del loss
                     optimizer.zero_grad()
                     gc.collect()
                     torch.cuda.empty_cache()
@@ -162,7 +187,7 @@ def main():
                         return
                     continue
 
-                if global_step % GRAD_ACCUM == 0:
+                if global_step % GRAD_ACCUM == 0 or (step + 1) == len(train_loader):
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     optimizer.step()
                     optimizer.zero_grad()
@@ -187,8 +212,10 @@ def main():
                     val_loss /= eval_batches
                     ppl = torch.exp(torch.tensor(val_loss)).item()
 
+                    # Log eval-time active layers: all 28 (hook is training-only, skip=0.0 at inference)
+                    # Train-time expected active layers = 4 + 24*0.50 = 16.0 (logged separately as train_skip_ratio)
                     with open(CSV_FILENAME, "a", newline="") as f:
-                        csv.writer(f).writerow([epoch, global_step, loss.item() * GRAD_ACCUM, val_loss, ppl, 16.0, 0.50])
+                        csv.writer(f).writerow([epoch, global_step, loss.item() * GRAD_ACCUM, val_loss, ppl, 28.0, 0.0])
 
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss

@@ -159,9 +159,13 @@ class TokenLevelGumbelRouter(nn.Module):
     def forward(self, h: torch.Tensor, temperature: float = 0.5, hard: bool = False):
         h         = h.float()
         logits    = self.net(h)
-        logits_2c = torch.stack([torch.zeros_like(logits), logits], dim=-1)
-        soft      = F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)
-        return soft[..., 1].to(h.dtype)
+        if self.training:
+            logits_2c = torch.stack([torch.zeros_like(logits), logits], dim=-1)
+            soft      = F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)
+            return soft[..., 1].to(h.dtype)
+        if hard:
+            return (logits > 0).to(h.dtype)
+        return torch.sigmoid(logits).to(h.dtype)
 
 # ---------------------------------------------------------------------------
 # Model loader helpers
@@ -280,7 +284,7 @@ class GatedForwardContext:
 
 
 def gated_forward_eval(model, input_ids, attention_mask=None, labels=None,
-                       temperature=0.5, hard=True, is_token_level=False):
+                       temperature=0.1, hard=True, is_token_level=False):
     """
     Gated forward for perplexity eval with early stopping.
     hard=True  → binary gates, matching training-time behaviour (fair PPL comparison).
@@ -365,7 +369,7 @@ def eval_perplexity(model, tokenizer, is_gumbel: bool, is_token_level: bool = Fa
                     input_ids=batch["input_ids"],
                     attention_mask=batch.get("attention_mask"),
                     labels=batch.get("labels"),
-                    temperature=0.5,  # final annealed temperature
+                    temperature=0.1,  # deterministic evaluation temperature
                     hard=True,        # binary gates → fair comparison with static baselines
                     is_token_level=is_token_level,
                 )
@@ -528,7 +532,7 @@ def evaluate_variant(name, load_fn, checkpoint, is_gumbel=False):
                 _captured_state["h"] = h_float
                 h_device = h_float.to(next(_router_ref.parameters()).device)
                 with torch.no_grad():
-                    _captured_state["gates"] = _router_ref(h_device, temperature=0.5, hard=True)
+                    _captured_state["gates"] = _router_ref(h_device, temperature=0.1, hard=True)
             _persistent_hooks.append(
                 all_layers[ALWAYS_KEEP - 1].register_forward_hook(_capture_hook)
             )
@@ -797,7 +801,7 @@ def plot_per_layer_skip_rate(model, tokenizer, checkpoint_path, n_samples=200, d
                 input_ids=batch["input_ids"],
                 attention_mask=batch.get("attention_mask"),
                 labels=batch.get("labels"),
-                temperature=0.5, hard=True,
+                temperature=0.1, hard=True,
                 is_token_level=is_token_level,
             )
             # gates: [B, L] or [B, S, L]. Average over all dims except last → per-layer skip rate

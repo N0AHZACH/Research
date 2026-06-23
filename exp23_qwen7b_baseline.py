@@ -26,7 +26,9 @@ def get_optimal_config():
     if not torch.cuda.is_available():
         return 2, 8, 0, None, True, torch.float32
 
-    vram_gb = sum(torch.cuda.get_device_properties(i).total_memory for i in range(torch.cuda.device_count())) / (1024**3)
+    # This script loads the model on cuda:0, so size the batch for that device,
+    # not for aggregate VRAM across all visible GPUs.
+    vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
     gpu_name = torch.cuda.get_device_name(0)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -34,7 +36,7 @@ def get_optimal_config():
     is_turing = 'T4' in gpu_name or 'RTX 20' in gpu_name or 'Turing' in gpu_name
 
     if vram_gb >= 80: bs, ga = 16, 1
-    elif vram_gb >= 45: bs, ga = 16, 1  # 48GB cards like RTX 6000 Pro
+    elif vram_gb >= 45: bs, ga = 8, 2   # 48GB cards like RTX 6000 Pro
     elif vram_gb >= 35: bs, ga = 8, 2   # 40GB cards like A100
     elif vram_gb >= 22: bs, ga = 4, 4   # 24GB cards like RTX 4090
     elif vram_gb >= 14: bs, ga = 2, 8   # 16GB cards like T4
@@ -123,7 +125,7 @@ def main():
         model.train()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")
         
-        for batch in pbar:
+        for step, batch in enumerate(pbar):
             global_step += 1
             input_ids = batch["input_ids"].to("cuda")
             attention_mask = batch["attention_mask"].to("cuda")
@@ -152,7 +154,7 @@ def main():
                     return
                 continue
 
-            if global_step % GRAD_ACCUM == 0:
+            if global_step % GRAD_ACCUM == 0 or (step + 1) == len(train_loader):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()

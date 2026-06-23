@@ -91,6 +91,10 @@ args = parser.parse_args()
 RESEARCH_DIR = Path(__file__).parent
 MODEL_ID     = "meta-llama/Meta-Llama-3.1-8B"
 hf_token     = os.environ.get("HF_TOKEN")  # defined here so all functions can access it
+if hf_token:
+    from huggingface_hub import login
+    login(token=hf_token)
+
 
 def _latest_checkpoint(pattern: str) -> Optional[Path]:
     """
@@ -186,7 +190,7 @@ def load_base_model(device="cuda"):
     """Load frozen Llama3.1-8B as a reference (no LoRA)."""
     print(f"  Loading base Llama3.1-8B from hub...")
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL, low_cpu_mem_usage=True, use_safetensors=True
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL, low_cpu_mem_usage=True, token=hf_token, use_safetensors=True
     ).to(device)
     hf_token = os.environ.get("HF_TOKEN")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=hf_token)
@@ -209,7 +213,7 @@ def load_lora_checkpoint(checkpoint_path: Path, device="cuda"):
         )
     print(f"  Loading LoRA checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL, low_cpu_mem_usage=True, use_safetensors=True
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL, low_cpu_mem_usage=True, token=hf_token, use_safetensors=True
     ).to(device)
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
     model = model.merge_and_unload()   # merge LoRA into base weights for standard eval
@@ -227,7 +231,7 @@ def load_gumbel_checkpoint(checkpoint_path: Path, device="cuda"):
     """
     print(f"  Loading Gumbel router checkpoint: {checkpoint_path}")
     base = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL, low_cpu_mem_usage=True, use_safetensors=True
+        MODEL_ID, torch_dtype=torch.bfloat16, attn_implementation=ATTN_IMPL, low_cpu_mem_usage=True, token=hf_token, use_safetensors=True
     ).to(device)
     model = PeftModel.from_pretrained(base, str(checkpoint_path))
 

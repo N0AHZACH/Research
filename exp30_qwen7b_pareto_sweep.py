@@ -152,9 +152,13 @@ class TokenLevelGumbelRouter(nn.Module):
     def forward(self, h_seq: torch.Tensor, temperature: float, hard: bool = True):
         h_seq = h_seq.float()
         logits = self.net(h_seq)
-        logits_2c = torch.stack([torch.zeros_like(logits), logits], dim=-1)
-        soft = F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)
-        return soft[..., 1].to(h_seq.dtype)
+        if self.training:
+            logits_2c = torch.stack([torch.zeros_like(logits), logits], dim=-1)
+            soft = F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)
+            return soft[..., 1].to(h_seq.dtype)
+        if hard:
+            return (logits > 0).to(h_seq.dtype)
+        return torch.sigmoid(logits).to(h_seq.dtype)
 
 # ==============================================================================
 # Hook-based Token-Level Gated Forward Pass
@@ -328,6 +332,8 @@ def train_one_penalty(penalty: float) -> dict:
     model = get_peft_model(base_model, lora_cfg)
     
     ROUTABLE_LAYERS = len(model.base_model.model.model.layers) - ALWAYS_KEEP
+    assert len(model.base_model.model.model.layers) == 28, \
+        f"Expected 28 layers for Qwen2.5-7B, got {len(model.base_model.model.model.layers)}"
     model.router = TokenLevelGumbelRouter(model.config.hidden_size, ROUTABLE_LAYERS).to("cuda")
     
     for p in model.router.parameters():
@@ -459,7 +465,11 @@ def train_one_penalty(penalty: float) -> dict:
         torch.cuda.empty_cache()
         current_temp = max(GUMBEL_TEMP_MIN, current_temp * TEMP_ANNEAL_RATE)
 
-    # Evaluation
+    # Evaluation — use near-zero temperature for deterministic routing.
+    # Scientific rationale: Gumbel noise at current_temp makes layer skip counts
+    # and val_loss stochastic per run, which would make the Pareto curve non-reproducible.
+    # EVAL_TEMP=0.1 makes gates effectively hard-sigmoid(logit/0.1) — deterministic.
+    EVAL_TEMP = 0.1
     model.eval()
     total_val_loss = 0.0
     layer_counts = []
@@ -470,7 +480,7 @@ def train_one_penalty(penalty: float) -> dict:
             if i >= MAX_EVAL_BATCHES: 
                 break
             v_batch = {k: v.to("cuda") for k, v in v_batch.items()}
-            _, v_ce, v_gates = gated_forward(model, v_batch, current_temp, hard=True)
+            _, v_ce, v_gates = gated_forward(model, v_batch, EVAL_TEMP, hard=True)
             total_val_loss += v_ce.item()
             
             p_val = v_gates.float().mean(dim=(0, 1))
