@@ -63,6 +63,12 @@ def main():
     
     from huggingface_hub import login
     import os
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+
     if "HF_TOKEN" in os.environ:
         login(token=os.environ["HF_TOKEN"])
     

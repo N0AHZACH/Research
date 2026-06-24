@@ -35,9 +35,36 @@ LR               = 3e-5
 WEIGHT_DECAY     = 0.01
 
 ALWAYS_KEEP      = 4
-COMPUTE_PENALTY  = 0.02   # Drastically reduced to match ~2.0 scale of CE/KD loss (0.02 * 32 layers = 0.64 gate loss)
 TARGET_SKIP      = 0.40   # Target: ~60% active layers (~13.2 / 22)
 TARGET_PENALTY   = 0.5    # Reduced attractor to match new loss scale
+
+def get_optimal_penalty_from_sweep(target_skip, fallback=0.02):
+    import glob, os, csv
+    sweep_files = glob.glob("results/exp31_llama8b_pareto_*.csv")
+    if not sweep_files:
+        print(f"[WARNING] No Pareto sweep results found. Using fallback COMPUTE_PENALTY = {fallback}")
+        return fallback
+    latest_sweep = max(sweep_files, key=os.path.getmtime)
+    print(f"[INFO] Auto-detecting optimal penalty from {latest_sweep} (targeting {target_skip} skip ratio)")
+    best_penalty = fallback
+    closest_diff = float('inf')
+    try:
+        with open(latest_sweep, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                penalty = float(row["Penalty"])
+                skip_ratio = float(row["Skip Ratio"])
+                diff = abs(skip_ratio - target_skip)
+                if diff < closest_diff:
+                    closest_diff = diff
+                    best_penalty = penalty
+        print(f"[INFO] Selected COMPUTE_PENALTY = {best_penalty}")
+        return best_penalty
+    except Exception as e:
+        print(f"[ERROR] Failed to parse sweep file: {e}. Using fallback {fallback}")
+        return fallback
+
+COMPUTE_PENALTY  = get_optimal_penalty_from_sweep(TARGET_SKIP)
 GUMBEL_TEMP      = 1.0
 TEMP_ANNEAL_RATE = 0.95
 KD_ALPHA         = 0.3    # Give more weight to KD, less to raw CE
@@ -215,6 +242,14 @@ def main():
     raw      = raw.filter(lambda x: len(x["text"]) > 100).select(range(TRAIN_SAMPLES))
     eval_raw = eval_raw.filter(lambda x: len(x["text"]) > 100).select(range(EVAL_SAMPLES))
 
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+    from huggingface_hub import login
+    if "HF_TOKEN" in os.environ:
+        login(token=os.environ["HF_TOKEN"])
     hf_token = os.environ.get("HF_TOKEN")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=hf_token)
     tokenizer.pad_token = tokenizer.eos_token

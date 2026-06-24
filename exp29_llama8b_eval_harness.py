@@ -90,6 +90,12 @@ args = parser.parse_args()
 # ---------------------------------------------------------------------------
 RESEARCH_DIR = Path(__file__).parent
 MODEL_ID     = "meta-llama/Meta-Llama-3.1-8B"
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 hf_token     = os.environ.get("HF_TOKEN")  # defined here so all functions can access it
 if hf_token:
     from huggingface_hub import login

@@ -121,11 +121,12 @@ class TokenLevelGumbelRouter(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_size // 4, num_layers),
         )
-        # Moderate negative bias: start gates slightly below 50/50
-        # -1.5 gives ~18% initial gate probability (sigmoid(-1.5)≈0.18)
+        # Depth-scaled initialization: Break routing collapse immediately!
+        # Start early layers with positive bias (keep), late layers with negative (drop)
         last_layer = self.net[-1]
         if isinstance(last_layer, nn.Linear):
-            nn.init.constant_(last_layer.bias, -1.5)  # type: ignore
+            bias_vals = torch.linspace(1.0, -3.0, steps=num_layers)
+            last_layer.bias.data.copy_(bias_vals)
 
     def forward(self, h_seq: torch.Tensor, temperature: float, hard: bool = True):
         h_seq  = h_seq.float()                                            # precision for Gumbel
@@ -438,21 +439,23 @@ def main():
 
     def compute_gate_loss(gates):
         """
-        Compute the gate sparsity loss with three components:
-        1. Per-layer L1 penalty: penalize each layer's token-averaged activity independently
-        2. Target skip ratio: quadratic penalty for deviating from TARGET_SKIP
-        3. Total is much more effective than global mean(gates) for token-level routing
+        Compute the gate sparsity loss with depth-scaled penalties to break routing collapse.
+        Instead of penalizing all layers equally (which causes uniform flat dropping),
+        we penalize later layers more heavily than earlier layers.
         
         gates: [B, S, L] binary gates
         """
         # Per-layer average activity: [L]
         per_layer_activity = gates.float().mean(dim=(0, 1))  # average over batch and sequence
         
-        # L1 penalty: sum of per-layer activities (not mean — so each layer contributes equally)
-        l1_penalty = per_layer_activity.sum() * COMPUTE_PENALTY
+        # Break Routing Collapse: Depth-scaled L1 penalty
+        # Linearly scale penalty from 0.1 (early layers) to 2.0 (late layers)
+        L = per_layer_activity.size(0)
+        depth_weights = torch.linspace(0.1, 2.0, steps=L, device=gates.device)
         
-        # Target skip ratio: quadratic penalty for deviation from target
-        # skip_ratio = 1 - mean(gates) = fraction of gates that are 0
+        l1_penalty = (per_layer_activity * depth_weights).sum() * COMPUTE_PENALTY
+        
+        # Target skip ratio: quadratic penalty for deviation from global target
         actual_skip = 1.0 - gates.float().mean()
         target_penalty = TARGET_PENALTY * (actual_skip - TARGET_SKIP) ** 2
         

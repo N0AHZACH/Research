@@ -21,6 +21,7 @@ WEIGHT_DECAY     = 0.01
 
 EVAL_EVERY_STEPS = 50
 LOG_EVERY_STEPS  = 10
+TARGET_SKIP      = 0.40
 
 def get_optimal_config():
     if not torch.cuda.is_available():
@@ -61,6 +62,14 @@ SAVE_DIR     = f"exp27_llama8b_stochastic_output_{TIMESTAMP}"
 def main():
     print(f"\n{'='*70}\n  EXP27: LLAMA3.1-8B FULL-DEPTH STOCHASTIC (32 Layers)\n{'='*70}")
     
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+    from huggingface_hub import login
+    if "HF_TOKEN" in os.environ:
+        login(token=os.environ["HF_TOKEN"])
     hf_token = os.environ.get("HF_TOKEN")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=hf_token)
     tokenizer.pad_token = tokenizer.eos_token
@@ -109,8 +118,7 @@ def main():
     # --- STOCHASTIC DROPOUT ---
     import random
     def stochastic_hook(module, input, output):
-        # Drop ~50% of the time
-        if model.training and random.random() < 0.50:
+        if model.training and random.random() < TARGET_SKIP:
             residual = input[0]
             return (residual,) + output[1:] if isinstance(output, tuple) else residual
         return output
@@ -196,7 +204,7 @@ def main():
                     ppl = torch.exp(torch.tensor(val_loss)).item()
 
                     with open(CSV_FILENAME, "a", newline="") as f:
-                        csv.writer(f).writerow([epoch, global_step, loss.item() * GRAD_ACCUM, val_loss, ppl, 18.0, 0.50])
+                        csv.writer(f).writerow([epoch, global_step, loss.item() * GRAD_ACCUM, val_loss, ppl, 32.0 * (1 - TARGET_SKIP), TARGET_SKIP])
 
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss

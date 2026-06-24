@@ -148,7 +148,12 @@ class TokenLevelGumbelRouter(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_size // 4, num_layers),
         )
-        nn.init.constant_(self.net[-1].bias, -1.5)
+        # Depth-scaled initialization: Break routing collapse immediately!
+        # Start early layers with positive bias (keep), late layers with negative (drop)
+        last_layer = self.net[-1]
+        if isinstance(last_layer, nn.Linear):
+            bias_vals = torch.linspace(1.0, -3.0, steps=num_layers)
+            last_layer.bias.data.copy_(bias_vals)
 
     def forward(self, h_seq: torch.Tensor, temperature: float, hard: bool = True):
         h_seq = h_seq.float()
@@ -372,7 +377,11 @@ def train_one_penalty(penalty: float) -> dict:
                 
                 # Pareto specific gate loss: linearly scales with overall layer activity
                 per_layer_activity = gates.float().mean(dim=(0, 1))
-                gate_loss = per_layer_activity.sum() * penalty
+                
+                # Break Routing Collapse: Depth-scaled L1 penalty
+                L_dim = per_layer_activity.size(0)
+                depth_weights = torch.linspace(0.1, 2.0, steps=L_dim, device=gates.device)
+                gate_loss = (per_layer_activity * depth_weights).sum() * penalty
                 
                 # Compute routing entropy to prove dynamic routing (not static)
                 p = per_layer_activity.detach()

@@ -265,6 +265,14 @@ eval_raw = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="val
 raw      = raw.filter(lambda x: len(x["text"]) > 100).select(range(TRAIN_SAMPLES))
 eval_raw = eval_raw.filter(lambda x: len(x["text"]) > 100).select(range(EVAL_SAMPLES))
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+from huggingface_hub import login
+if "HF_TOKEN" in os.environ:
+    login(token=os.environ["HF_TOKEN"])
 hf_token = os.environ.get("HF_TOKEN")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=hf_token)
 tokenizer.pad_token = tokenizer.eos_token
