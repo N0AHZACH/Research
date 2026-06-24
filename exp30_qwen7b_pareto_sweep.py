@@ -376,7 +376,10 @@ def train_one_penalty(penalty: float) -> dict:
                 s_logits, ce_loss, gates = gated_forward(model, batch, current_temp, hard=True)
                 
                 # Pareto specific gate loss: linearly scales with overall layer activity
-                per_layer_activity = gates.float().mean(dim=(0, 1))
+                # CRITICAL FIX: Mask out padding tokens to prevent false efficiency metrics
+                mask = batch["attention_mask"].unsqueeze(-1).float()
+                active_tokens = batch["attention_mask"].sum().clamp(min=1.0)
+                per_layer_activity = (gates.float() * mask).sum(dim=(0, 1)) / active_tokens
                 
                 # Break Routing Collapse: Depth-scaled L1 penalty
                 L_dim = per_layer_activity.size(0)
@@ -389,7 +392,7 @@ def train_one_penalty(penalty: float) -> dict:
                 layer_entropy = -(p * torch.log(p + eps) + (1.0 - p) * torch.log(1.0 - p + eps)).mean()
 
                 # Save scalar metrics BEFORE backward/cleanup (gates will be deleted)
-                skip_ratio_val = 1.0 - gates.detach().float().mean().item()
+                skip_ratio_val = 1.0 - p.mean().item()
                 
                 if global_step < KD_WARMUP_STEPS:
                     total_loss = (ce_loss + gate_loss) / GRAD_ACCUM
@@ -493,7 +496,10 @@ def train_one_penalty(penalty: float) -> dict:
             _, v_ce, v_gates = gated_forward(model, v_batch, EVAL_TEMP, hard=True)
             total_val_loss += v_ce.item()
             
-            p_val = v_gates.float().mean(dim=(0, 1))
+            v_mask = v_batch["attention_mask"].unsqueeze(-1).float()
+            v_active = v_batch["attention_mask"].sum().clamp(min=1.0)
+            p_val = (v_gates.float() * v_mask).sum(dim=(0, 1)) / v_active
+            
             layer_counts.append(p_val.sum().item() + ALWAYS_KEEP)
             val_entropies.append(-(p_val * torch.log(p_val + 1e-8) + (1.0 - p_val) * torch.log(1.0 - p_val + 1e-8)).mean().item())
     
