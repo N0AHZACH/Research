@@ -2,6 +2,7 @@ import csv
 import gc
 import os
 import datetime
+import random
 import torch
 import torch.nn as nn
 from datasets import load_dataset
@@ -21,6 +22,7 @@ WEIGHT_DECAY     = 0.01
 
 EVAL_EVERY_STEPS = 50
 LOG_EVERY_STEPS  = 10
+SEED             = 42
 
 def get_optimal_config():
     if not torch.cuda.is_available():
@@ -33,7 +35,7 @@ def get_optimal_config():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    is_turing = 'T4' in gpu_name or 'RTX 20' in gpu_name or 'Turing' in gpu_name
+    # is_turing check removed — compute_dtype selected by SM major version below
 
     if vram_gb >= 80: bs, ga = 16, 1
     elif vram_gb >= 45: bs, ga = 8, 2   # 48GB cards like RTX 6000 Pro
@@ -63,7 +65,13 @@ SAVE_DIR     = f"exp24_qwen7b_stochastic_output_{TIMESTAMP}"
 
 def main():
     print(f"\n{'='*70}\n  EXP24: QWEN2.5-7B FULL-DEPTH STOCHASTIC (28 Layers)\n{'='*70}")
-    
+
+    # Seed all RNGs for cross-run reproducibility
+    random.seed(SEED)
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.pad_token = tokenizer.eos_token
 
@@ -86,7 +94,6 @@ def main():
 
     class RAMDataset(torch.utils.data.Dataset):
         def __init__(self, enc):
-            import torch
             ids = enc["input_ids"]
             mask = enc["attention_mask"]
             self.input_ids = ids if isinstance(ids, torch.Tensor) else torch.stack(list(ids))
@@ -102,43 +109,55 @@ def main():
     eval_loader  = DataLoader(RAMDataset(eval_enc),  batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=pin)
 
     print(f"Loading {MODEL_ID}...")
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL).to("cuda")
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID,
+        torch_dtype=COMPUTE_DTYPE,
+        **({"attn_implementation": ATTN_IMPL} if ATTN_IMPL else {}),
+    ).to("cuda")
     model.config.use_cache = False  # CRITICAL: Prevent hidden KV cache memory leaks across forward passes
 
     lora_cfg = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.05, bias="none", task_type=TaskType.CAUSAL_LM)
     model = get_peft_model(model, lora_cfg)
     model.print_trainable_parameters()
-    # --- STOCHASTIC DROPOUT (Training-Only Regularizer) ---
-    # Scientific framing: This is a stochastic depth CONTROL experiment.
-    # The hook drops layers with p=0.50 ONLY during training (expected 16 active layers).
-    # During evaluation, all 28 layers are always active (skip_ratio=0.0).
-    # This correctly measures the regularized model at full inference capacity.
-    import random
-    def stochastic_hook(module, input, output):
-        # Drop ~50% of the time during training only
-        residual = input[0]
-        is_tuple = isinstance(output, tuple)
-        layer_out = output[0] if is_tuple else output
-        layer_delta = layer_out - residual
+    # --- STOCHASTIC DEPTH CONTROL ---
+    # Drop residual branches without train-time expectation scaling to avoid
+    # Pre-LN variance spikes. Evaluation uses the expected residual contribution
+    # so train/eval activation magnitudes stay aligned.
+    TARGET_SKIP = 0.50
+    model.stochastic_stats = {"total": 0, "dropped": 0}
 
-        if model.training:
-            if random.random() < 0.50:
-                res = residual
+    def make_stochastic_forward(original_forward):
+        def stochastic_forward(*args, **kwargs):
+            hidden_states = kwargs.get("hidden_states", args[0] if len(args) > 0 else None)
+            
+            if model.training:
+                model.stochastic_stats["total"] += 1
+                if random.random() < TARGET_SKIP:
+                    model.stochastic_stats["dropped"] += 1
+                    # Skip computation entirely: saves VRAM and FLOPs
+                    return (hidden_states,)
+                else:
+                    return original_forward(*args, **kwargs)
             else:
-                res = residual + 2.0 * layer_delta
-        else:
-            res = layer_out
+                # Eval: compute full layer and apply expected scaling
+                output = original_forward(*args, **kwargs)
+                layer_out = output[0] if isinstance(output, tuple) else output
+                
+                # Expected scaling: residual + (1 - p) * F(residual)
+                scaled_out = hidden_states + (1.0 - TARGET_SKIP) * (layer_out - hidden_states)
+                
+                return (scaled_out,) + output[1:] if isinstance(output, tuple) else scaled_out
+        return stochastic_forward
 
-        return (res,) + output[1:] if is_tuple else res
-
-
-    handles = []
+    original_forwards = {}
     # Qwen2.5-7B has 28 layers total. We protect the first 4 (embedding layers).
     num_layers = len(model.base_model.model.model.layers)
     assert num_layers == 28, f"Expected 28 layers for Qwen2.5-7B, got {num_layers}"
     for i in range(4, num_layers):
-        handles.append(model.base_model.model.model.layers[i].register_forward_hook(stochastic_hook))
-    print(f"[STOCHASTIC] Registered dropout hooks on layers 4-{num_layers-1} ({num_layers-4} routable layers, p=0.50 drop rate)")
+        layer = model.base_model.model.model.layers[i]
+        original_forwards[i] = layer.forward
+        layer.forward = make_stochastic_forward(layer.forward)
+    print(f"[STOCHASTIC] Monkey-patched forward on layers 4-{num_layers-1} ({num_layers-4} routable layers, p=0.50 drop rate)")
 
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
@@ -149,6 +168,7 @@ def main():
 
     global_step = 0
     best_val_loss = float("inf")
+    last_train_loss = None  # Most recent unscaled training loss; avoids stale values at eval time
 
     print("\nStarting Training...")
     oom_count = 0
@@ -164,11 +184,13 @@ def main():
                 input_ids = batch["input_ids"].to("cuda")
                 attention_mask = batch["attention_mask"].to("cuda")
                 labels = batch["labels"].to("cuda")
+                stats_before_batch = model.stochastic_stats.copy()
 
                 try:
                     outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                     loss = outputs.loss / GRAD_ACCUM
                     loss.backward()
+                    last_train_loss = outputs.loss.item()  # Capture immediately; safe against later OOM
                 except torch.cuda.OutOfMemoryError as e:
                     oom_count += 1
                     print(f"\n[OOM] CUDA OOM (occurrence {oom_count}/{MAX_OOM_RETRIES}). Clearing cache and skipping batch...")
@@ -178,6 +200,7 @@ def main():
                     del e
                     if 'outputs' in locals(): del outputs
                     if 'loss' in locals(): del loss
+                    model.stochastic_stats = stats_before_batch
                     optimizer.zero_grad()
                     gc.collect()
                     torch.cuda.empty_cache()
@@ -213,15 +236,25 @@ def main():
                     val_loss /= eval_batches
                     ppl = torch.exp(torch.tensor(val_loss)).item()
 
-                    # Log eval-time active layers: all 28 (hook is training-only, skip=0.0 at inference)
-                    # Train-time expected active layers = 4 + 24*0.50 = 16.0 (logged separately as train_skip_ratio)
+                    # Empirical skip ratio from the training window preceding this eval
+                    total = max(1, model.stochastic_stats["total"])
+                    dropped = model.stochastic_stats["dropped"]
+                    empirical_skip_ratio = dropped / total
+                    routable = num_layers - 4  # Layers eligible for stochastic dropping
+                    empirical_active = num_layers - routable * empirical_skip_ratio
+
+                    logged_train_loss = last_train_loss if last_train_loss is not None else float("nan")
                     with open(CSV_FILENAME, "a", newline="") as f:
-                        csv.writer(f).writerow([epoch, global_step, loss.item() * GRAD_ACCUM, val_loss, ppl, 28.0, 0.0])
+                        csv.writer(f).writerow([epoch, global_step, logged_train_loss, val_loss, ppl, empirical_active, empirical_skip_ratio])
+
+                    # Reset tracking for next eval window
+                    model.stochastic_stats = {"total": 0, "dropped": 0}
 
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
                         model.save_pretrained(os.path.join(SAVE_DIR, "best_model"))
                         tokenizer.save_pretrained(os.path.join(SAVE_DIR, "best_model"))
+
                     model.train()
     except KeyboardInterrupt:
         print("\n[INTERRUPT] Training interrupted by user. Saving checkpoint...")
