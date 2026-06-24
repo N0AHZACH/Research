@@ -1,3 +1,6 @@
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 """
 exp28_llama8b_token_routing.py - Token-Level Routing for Llama-3.1-8B
 

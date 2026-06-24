@@ -1,7 +1,10 @@
-"""
-exp30_qwen7b_pareto_sweep.py - Publication-Ready Token-Level Routing Pareto Sweep
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-This script performs a systematic 7-point Pareto sweep for Qwen2.5-7B token routing.
+"""
+exp31_llama8b_pareto_sweep.py - Publication-Ready Token-Level Routing Pareto Sweep
+
+This script performs a systematic 7-point Pareto sweep for Meta-Llama-3.1-8B token routing.
 It automates the discovery of the optimal compute penalty by training the model
 under varying sparsity constraints and plotting the resulting accuracy-efficiency
 frontier.
@@ -49,7 +52,7 @@ from tqdm import tqdm
 # ==============================================================================
 # Configuration
 # ==============================================================================
-MODEL_ID         = "Qwen/Qwen2.5-7B"
+MODEL_ID         = "meta-llama/Meta-Llama-3.1-8B"
 MAX_LENGTH       = 512
 ALWAYS_KEEP      = 4
 PENALTIES        = [0.005, 0.01, 0.02, 0.05, 0.10, 0.20, 0.40]
@@ -106,8 +109,7 @@ def get_optimal_config():
     else:                # 8GB cards
         bs, ga = 1, 16
 
-    major, _ = torch.cuda.get_device_capability(0)
-    compute_dtype = torch.float16 if major < 8 else torch.bfloat16
+    compute_dtype = torch.float16 if is_turing else torch.bfloat16
     cpu_count = os.cpu_count() or 2
     
     # LINUX GCP OPTIMIZATION: On Linux, PyTorch uses 'fork' for multiprocessing.
@@ -129,8 +131,8 @@ BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL, COMPUTE_DTYPE = get_optimal_conf
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 os.makedirs("results", exist_ok=True)
-CSV_FILENAME = f"results/exp30_qwen7b_pareto_{TIMESTAMP}.csv"
-PLOT_FILE    = f"results/exp30_qwen7b_pareto_{TIMESTAMP}.png"
+CSV_FILENAME = f"results/exp31_llama8b_pareto_{TIMESTAMP}.csv"
+PLOT_FILE    = f"results/exp31_llama8b_pareto_{TIMESTAMP}.png"
 
 # ==============================================================================
 # Token-Level Router
@@ -148,23 +150,14 @@ class TokenLevelGumbelRouter(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_size // 4, num_layers),
         )
-        # Depth-scaled initialization: Break routing collapse immediately!
-        # Start early layers with positive bias (keep), late layers with negative (drop)
-        last_layer = self.net[-1]
-        if isinstance(last_layer, nn.Linear):
-            bias_vals = torch.linspace(1.0, -3.0, steps=num_layers)
-            last_layer.bias.data.copy_(bias_vals)
+        nn.init.constant_(self.net[-1].bias, -1.5)
 
     def forward(self, h_seq: torch.Tensor, temperature: float, hard: bool = True):
         h_seq = h_seq.float()
         logits = self.net(h_seq)
-        if self.training:
-            logits_2c = torch.stack([torch.zeros_like(logits), logits], dim=-1)
-            soft = F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)
-            return soft[..., 1].to(h_seq.dtype)
-        if hard:
-            return (logits > 0).to(h_seq.dtype)
-        return torch.sigmoid(logits).to(h_seq.dtype)
+        logits_2c = torch.stack([torch.zeros_like(logits), logits], dim=-1)
+        soft = F.gumbel_softmax(logits_2c, tau=temperature, hard=hard, dim=-1)
+        return soft[..., 1].to(h_seq.dtype)
 
 # ==============================================================================
 # Hook-based Token-Level Gated Forward Pass
@@ -275,7 +268,16 @@ eval_raw = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="val
 raw      = raw.filter(lambda x: len(x["text"]) > 100).select(range(TRAIN_SAMPLES))
 eval_raw = eval_raw.filter(lambda x: len(x["text"]) > 100).select(range(EVAL_SAMPLES))
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+from huggingface_hub import login
+if "HF_TOKEN" in os.environ:
+    login(token=os.environ["HF_TOKEN"])
+hf_token = os.environ.get("HF_TOKEN")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=hf_token)
 tokenizer.pad_token = tokenizer.eos_token
 
 def tokenize(batch):
@@ -323,7 +325,8 @@ def train_one_penalty(penalty: float) -> dict:
     base_model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID, 
         torch_dtype=COMPUTE_DTYPE, 
-        attn_implementation=ATTN_IMPL
+        attn_implementation=ATTN_IMPL,
+        token=hf_token
     ).to("cuda")
     base_model.config.use_cache = False  # CRITICAL: Prevent hidden KV cache memory leaks across forward passes
     
@@ -338,8 +341,6 @@ def train_one_penalty(penalty: float) -> dict:
     model = get_peft_model(base_model, lora_cfg)
     
     ROUTABLE_LAYERS = len(model.base_model.model.model.layers) - ALWAYS_KEEP
-    assert len(model.base_model.model.model.layers) == 28, \
-        f"Expected 28 layers for Qwen2.5-7B, got {len(model.base_model.model.model.layers)}"
     model.router = TokenLevelGumbelRouter(model.config.hidden_size, ROUTABLE_LAYERS).to("cuda")
     
     for p in model.router.parameters():
@@ -380,11 +381,7 @@ def train_one_penalty(penalty: float) -> dict:
                 mask = batch["attention_mask"].unsqueeze(-1).float()
                 active_tokens = batch["attention_mask"].sum().clamp(min=1.0)
                 per_layer_activity = (gates.float() * mask).sum(dim=(0, 1)) / active_tokens
-                
-                # Break Routing Collapse: Depth-scaled L1 penalty
-                L_dim = per_layer_activity.size(0)
-                depth_weights = torch.linspace(0.1, 2.0, steps=L_dim, device=gates.device)
-                gate_loss = (per_layer_activity * depth_weights).sum() * penalty
+                gate_loss = per_layer_activity.sum() * penalty
                 
                 # Compute routing entropy to prove dynamic routing (not static)
                 p = per_layer_activity.detach()
@@ -478,11 +475,7 @@ def train_one_penalty(penalty: float) -> dict:
         torch.cuda.empty_cache()
         current_temp = max(GUMBEL_TEMP_MIN, current_temp * TEMP_ANNEAL_RATE)
 
-    # Evaluation — use near-zero temperature for deterministic routing.
-    # Scientific rationale: Gumbel noise at current_temp makes layer skip counts
-    # and val_loss stochastic per run, which would make the Pareto curve non-reproducible.
-    # EVAL_TEMP=0.1 makes gates effectively hard-sigmoid(logit/0.1) — deterministic.
-    EVAL_TEMP = 0.1
+    # Evaluation
     model.eval()
     total_val_loss = 0.0
     layer_counts = []
@@ -493,7 +486,7 @@ def train_one_penalty(penalty: float) -> dict:
             if i >= MAX_EVAL_BATCHES: 
                 break
             v_batch = {k: v.to("cuda") for k, v in v_batch.items()}
-            _, v_ce, v_gates = gated_forward(model, v_batch, EVAL_TEMP, hard=True)
+            _, v_ce, v_gates = gated_forward(model, v_batch, current_temp, hard=True)
             total_val_loss += v_ce.item()
             
             v_mask = v_batch["attention_mask"].unsqueeze(-1).float()
@@ -537,7 +530,7 @@ def train_one_penalty(penalty: float) -> dict:
 
 def main():
     print(f"\n{'*'*60}")
-    print(" QWEN-7B PARETO SWEEP EXPERIMENT (EXP30)")
+    print(" LLAMA-8B PARETO SWEEP EXPERIMENT (EXP31)")
     print(f"{'*'*60}\n")
 
     # Generate Manifest for Scientific Provenance
@@ -557,7 +550,7 @@ def main():
         "penalties": PENALTIES,
         "timestamp": TIMESTAMP
     }
-    manifest_path = f"results/exp30_qwen7b_manifest_{TIMESTAMP}.json"
+    manifest_path = f"results/exp31_llama8b_manifest_{TIMESTAMP}.json"
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=4)
     print(f"[MANIFEST] Saved experiment manifest to {manifest_path}")
@@ -603,7 +596,7 @@ def main():
             ha='center'
         )
         
-    plt.title("Qwen2.5-7B Token-Level Routing Pareto Frontier (3-Epoch)", fontsize=14, pad=15)
+    plt.title("Meta-Llama-3.1-8B Token-Level Routing Pareto Frontier (3-Epoch)", fontsize=14, pad=15)
     plt.xlabel("Layer Skip Ratio (%)", fontsize=12)
     plt.ylabel("Validation Cross-Entropy Loss", fontsize=12)
     plt.grid(True, linestyle="--", alpha=0.7)

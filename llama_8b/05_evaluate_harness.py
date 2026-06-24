@@ -1,3 +1,6 @@
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 """
 exp29_llama8b_eval_harness.py - Phase 4: Llama3.1-8B Evaluation Harness (RTX 6000 optimized)
 

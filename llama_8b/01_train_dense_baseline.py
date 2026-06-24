@@ -1,3 +1,6 @@
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import csv
 import gc
 import os
@@ -10,7 +13,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, TaskType
 from tqdm import tqdm
 
-MODEL_ID         = "Qwen/Qwen2.5-7B"
+MODEL_ID         = "meta-llama/Meta-Llama-3.1-8B"
 MAX_LENGTH       = 512
 TRAIN_SAMPLES    = 10000
 EVAL_SAMPLES     = 1000
@@ -26,9 +29,7 @@ def get_optimal_config():
     if not torch.cuda.is_available():
         return 2, 8, 0, None, True, torch.float32
 
-    # This script loads the model on cuda:0, so size the batch for that device,
-    # not for aggregate VRAM across all visible GPUs.
-    vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    vram_gb = sum(torch.cuda.get_device_properties(i).total_memory for i in range(torch.cuda.device_count())) / (1024**3)
     gpu_name = torch.cuda.get_device_name(0)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -36,15 +37,14 @@ def get_optimal_config():
     is_turing = 'T4' in gpu_name or 'RTX 20' in gpu_name or 'Turing' in gpu_name
 
     if vram_gb >= 80: bs, ga = 16, 1
-    elif vram_gb >= 45: bs, ga = 8, 2   # 48GB cards like RTX 6000 Pro
+    elif vram_gb >= 45: bs, ga = 16, 1  # 48GB cards like RTX 6000 Pro
     elif vram_gb >= 35: bs, ga = 8, 2   # 40GB cards like A100
     elif vram_gb >= 22: bs, ga = 4, 4   # 24GB cards like RTX 4090
     elif vram_gb >= 14: bs, ga = 2, 8   # 16GB cards like T4
     else: bs, ga = 1, 16
     use_4bit = False
 
-    major, _ = torch.cuda.get_device_capability(0)
-    compute_dtype = torch.float16 if major < 8 else torch.bfloat16
+    compute_dtype = torch.float16 if is_turing else torch.bfloat16
     cpu_count = os.cpu_count() or 2
     nw = 0  # RAMDataset is fully in-memory; multiprocessing adds massive IPC overhead on Windows
     try:
@@ -58,13 +58,25 @@ def get_optimal_config():
 BATCH_SIZE, GRAD_ACCUM, NUM_WORKERS, ATTN_IMPL, USE_4BIT, COMPUTE_DTYPE = get_optimal_config()
 
 TIMESTAMP    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CSV_FILENAME = f"exp23_qwen7b_baseline_metrics_{TIMESTAMP}.csv"
-SAVE_DIR     = f"exp23_qwen7b_baseline_output_{TIMESTAMP}"
+CSV_FILENAME = f"exp26_llama8b_baseline_metrics_{TIMESTAMP}.csv"
+SAVE_DIR     = f"exp26_llama8b_baseline_output_{TIMESTAMP}"
 
 def main():
-    print(f"\n{'='*70}\n  EXP23: QWEN2.5-7B BASELINE (FULL DEPT)\n{'='*70}")
+    print(f"\n{'='*70}\n  EXP26: LLAMA3.1-8B FULL-DEPTH BASELINE (32 Layers)\n{'='*70}")
     
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    from huggingface_hub import login
+    import os
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+
+    if "HF_TOKEN" in os.environ:
+        login(token=os.environ["HF_TOKEN"])
+    
+    hf_token = os.environ.get("HF_TOKEN")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, token=hf_token)
     tokenizer.pad_token = tokenizer.eos_token
 
     print("Pre-tokenizing dataset...")
@@ -102,7 +114,7 @@ def main():
     eval_loader  = DataLoader(RAMDataset(eval_enc),  batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=pin)
 
     print(f"Loading {MODEL_ID}...")
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL).to("cuda")
+    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=COMPUTE_DTYPE, attn_implementation=ATTN_IMPL, token=hf_token).to("cuda")
     model.config.use_cache = False  # CRITICAL: Prevent hidden KV cache memory leaks across forward passes
 
     lora_cfg = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], lora_dropout=0.05, bias="none", task_type=TaskType.CAUSAL_LM)
@@ -117,77 +129,79 @@ def main():
 
     global_step = 0
     best_val_loss = float("inf")
+
+    print("\nStarting Training...")
     oom_count = 0
     MAX_OOM_RETRIES = 5
 
-    print("\nStarting Training...")
     try:
-      for epoch in range(1, EPOCHS + 1):
-        model.train()
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")
-        
-        for step, batch in enumerate(pbar):
-            global_step += 1
-            input_ids = batch["input_ids"].to("cuda")
-            attention_mask = batch["attention_mask"].to("cuda")
-            labels = batch["labels"].to("cuda")
+        for epoch in range(1, EPOCHS + 1):
+            model.train()
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")
+            
+            for batch in pbar:
+                global_step += 1
+                input_ids = batch["input_ids"].to("cuda")
+                attention_mask = batch["attention_mask"].to("cuda")
+                labels = batch["labels"].to("cuda")
 
-            try:
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                loss = outputs.loss / GRAD_ACCUM
-                loss.backward()
-            except torch.cuda.OutOfMemoryError as e:
-                oom_count += 1
-                print(f"\n[OOM] CUDA OOM (occurrence {oom_count}/{MAX_OOM_RETRIES}). Clearing cache and skipping batch...")
-                import traceback
-                traceback.clear_frames(e.__traceback__)
-                e.__traceback__ = None
-                del e
-                if 'outputs' in locals(): del outputs
-                if 'loss' in locals(): del loss
-                optimizer.zero_grad()
-                gc.collect()
-                torch.cuda.empty_cache()
-                if oom_count >= MAX_OOM_RETRIES:
-                    print("[OOM] Too many OOM errors. Saving checkpoint and exiting.")
-                    model.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
-                    tokenizer.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
-                    return
-                continue
+                try:
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                    loss = outputs.loss / GRAD_ACCUM
+                    loss.backward()
+                except torch.cuda.OutOfMemoryError as e:
+                    oom_count += 1
+                    print(f"\n[OOM] CUDA OOM (occurrence {oom_count}/{MAX_OOM_RETRIES}). Clearing cache and skipping batch...")
+                    import traceback
+                    traceback.clear_frames(e.__traceback__)
+                    e.__traceback__ = None
+                    del e
+                    if 'outputs' in locals(): del outputs
+                    if 'loss' in locals(): del loss
+                    
+                    optimizer.zero_grad()
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    if oom_count >= MAX_OOM_RETRIES:
+                        print("[OOM] Too many OOM errors. Saving checkpoint and exiting.")
+                        model.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
+                        tokenizer.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
+                        return
+                    continue
 
-            if global_step % GRAD_ACCUM == 0 or (step + 1) == len(train_loader):
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                optimizer.zero_grad()
+                if global_step % GRAD_ACCUM == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                    optimizer.zero_grad()
 
-            if global_step % LOG_EVERY_STEPS == 0:
-                pbar.set_postfix({"Loss": f"{outputs.loss.item():.4f}"})
+                if global_step % LOG_EVERY_STEPS == 0:
+                    pbar.set_postfix({"Loss": f"{outputs.loss.item():.4f}"})
 
-            if global_step % EVAL_EVERY_STEPS == 0:
-                model.eval()
-                val_loss = 0.0
-                eval_batches = 0
-                with torch.no_grad():
-                    for ev_batch in eval_loader:
-                        ev_inputs = ev_batch["input_ids"].to("cuda")
-                        ev_masks = ev_batch["attention_mask"].to("cuda")
-                        ev_labels = ev_batch["labels"].to("cuda")
-                        outputs = model(input_ids=ev_inputs, attention_mask=ev_masks, labels=ev_labels)
-                        val_loss += outputs.loss.item()
-                        eval_batches += 1
-                        if eval_batches >= MAX_EVAL_BATCHES: break
+                if global_step % EVAL_EVERY_STEPS == 0:
+                    model.eval()
+                    val_loss = 0.0
+                    eval_batches = 0
+                    with torch.no_grad():
+                        for ev_batch in eval_loader:
+                            ev_inputs = ev_batch["input_ids"].to("cuda")
+                            ev_masks = ev_batch["attention_mask"].to("cuda")
+                            ev_labels = ev_batch["labels"].to("cuda")
+                            outputs = model(input_ids=ev_inputs, attention_mask=ev_masks, labels=ev_labels)
+                            val_loss += outputs.loss.item()
+                            eval_batches += 1
+                            if eval_batches >= MAX_EVAL_BATCHES: break
 
-                val_loss /= eval_batches
-                ppl = torch.exp(torch.tensor(val_loss)).item()
+                    val_loss /= eval_batches
+                    ppl = torch.exp(torch.tensor(val_loss)).item()
 
-                with open(CSV_FILENAME, "a", newline="") as f:
-                    csv.writer(f).writerow([epoch, global_step, loss.item() * GRAD_ACCUM, val_loss, ppl, 28.0, 0.0])
+                    with open(CSV_FILENAME, "a", newline="") as f:
+                        csv.writer(f).writerow([epoch, global_step, loss.item() * GRAD_ACCUM, val_loss, ppl, 32.0, 0.0])
 
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    model.save_pretrained(os.path.join(SAVE_DIR, "best_model"))
-                    tokenizer.save_pretrained(os.path.join(SAVE_DIR, "best_model"))
-                model.train()
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        model.save_pretrained(os.path.join(SAVE_DIR, "best_model"))
+                        tokenizer.save_pretrained(os.path.join(SAVE_DIR, "best_model"))
+                    model.train()
     except KeyboardInterrupt:
         print("\n[INTERRUPT] Training interrupted by user. Saving checkpoint...")
         model.save_pretrained(os.path.join(SAVE_DIR, "checkpoint_latest"))
@@ -204,7 +218,6 @@ def main():
     os.makedirs(os.path.join(SAVE_DIR, "final_model"), exist_ok=True)
     model.save_pretrained(os.path.join(SAVE_DIR, "final_model"))
     tokenizer.save_pretrained(os.path.join(SAVE_DIR, "final_model"))
-    print("Done!")
 
 if __name__ == "__main__":
     main()
