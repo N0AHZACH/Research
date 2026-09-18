@@ -2,8 +2,8 @@
 # 04_train_next_scale.sh — push further: Qwen2.5-3B full block (5 variants x 3 seeds
 # @500 steps, sw1600) + exploratory evals. Needs ~10GB bf16: fits >=16GB GPUs
 # (batch 4); on 24GB+ you can raise --batch-size in train.py if wanted.
-# Override: MODEL_ID=Qwen/Qwen2.5-7B PREFIX=qwen7b bash .../04_train_next_scale.sh
-# (~15GB bf16 — 24GB GPU only). Run from repo root.
+# Override: MODEL_ID=Qwen/Qwen2.5-7B PREFIX=qwen7b TRAIN_BS=2 bash .../04_train_next_scale.sh
+# (7B bf16 ~14GB — fits 20GB at TRAIN_BS=2, needs 24GB at batch 4). Run from repo root.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"

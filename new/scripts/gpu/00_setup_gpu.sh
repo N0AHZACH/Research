@@ -8,11 +8,12 @@ cd "$ROOT"
 test -f new/experiments/train.py || { echo "ERROR: run from repo root (must contain new/experiments/train.py)"; exit 1; }
 
 python3 --version
+# Ubuntu/Debian: if venv fails, first run: sudo apt install python3-venv python3-pip
 python3 -m venv .venv-gpu || python -m venv .venv-gpu
 source .venv-gpu/bin/activate
 pip install --upgrade pip
-# CUDA torch first (matches proven env; change cu124 only if your driver needs it)
-pip install torch --index-url https://download.pytorch.org/whl/cu124
+# CUDA torch first, pinned to the proven build (change cu124 only if your driver needs it)
+pip install "torch==2.6.0" --index-url https://download.pytorch.org/whl/cu124
 pip install -r new/scripts/gpu/requirements-gpu.txt
 
 echo "--- GPU check ---"

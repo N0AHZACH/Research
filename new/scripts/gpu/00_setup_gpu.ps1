@@ -10,7 +10,7 @@ py --version
 py -m venv .venv-gpu
 & ".\.venv-gpu\Scripts\Activate.ps1"
 pip install --upgrade pip
-pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip install "torch==2.6.0" --index-url https://download.pytorch.org/whl/cu124
 pip install -r new\scripts\gpu\requirements-gpu.txt
 
 Write-Output "--- GPU check ---"
