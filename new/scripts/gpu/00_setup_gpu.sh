@@ -8,8 +8,20 @@ cd "$ROOT"
 test -f new/experiments/train.py || { echo "ERROR: run from repo root (must contain new/experiments/train.py)"; exit 1; }
 
 python3 --version
-# Ubuntu/Debian: if venv fails, first run: sudo apt install python3-venv python3-pip
-python3 -m venv .venv-gpu || python -m venv .venv-gpu
+# Torch 2.6.0 ships wheels for Python 3.11-3.13 only (3.14 gives
+# "could not find a version that satisfies the requirement torch").
+# Pick the newest supported interpreter present on the box.
+PYBIN=""
+for py in python3.12 python3.13 python3.11 python3; do
+  if command -v "$py" >/dev/null 2>&1; then
+    ver=$("$py" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    case "$ver" in 3.11|3.12|3.13) PYBIN="$py"; break;; esac
+  fi
+done
+[ -n "$PYBIN" ] || { echo "ERROR: need Python 3.11-3.13 for torch 2.6.0 (box default: $(python3 --version)). Fix: sudo apt update && sudo apt install python3.12 python3.12-venv -y"; exit 1; }
+echo "using $PYBIN ($("$PYBIN" --version))"
+# Ubuntu/Debian: if venv fails, first run: sudo apt install python3.12-venv
+"$PYBIN" -m venv .venv-gpu || python -m venv .venv-gpu
 source .venv-gpu/bin/activate
 pip install --upgrade pip
 # CUDA torch first, pinned to the proven build (change cu124 only if your driver needs it)
