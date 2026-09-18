@@ -1,0 +1,13 @@
+{
+  "run_id": "tinyllama1b_stochastic_50_seed42",
+  "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "variant": "stochastic_50",
+  "target_skip": 0.5,
+  "seed": 42,
+  "max_steps": 150,
+  "batch_size": 4,
+  "kd_weight": 0.2,
+  "skip_weight": 400.0,
+  "l1_weight": 0.01,
+  "command": "python new/experiments/train.py --variant stochastic_50 --seed 42 --run-id tinyllama1b_stochastic_50_seed42 --max-steps 150"
+}

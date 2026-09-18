@@ -1,0 +1,11 @@
+{
+  "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "family": "tinyllama1b",
+  "total_layers": 22,
+  "always_keep_layers": 3,
+  "lora": {"rank": 8, "alpha": 16, "dropout": 0.05, "expanded_for_dlr": true},
+  "data": {"dataset": "wikitext/wikitext-103-raw-v1 train", "num_lines": 300, "max_length": 128, "eval_blocks": 50},
+  "optimizer": {"name": "AdamW-trainable-only", "lr": 2e-4, "warmup": "min(10, max_steps//5)", "scheduler": "cosine", "grad_clip": 1.0},
+  "router": {"arch": "MLP hidden->hidden/2->hidden/4->routable", "bias_init_keep_prob": 0.7, "tau": 2.0, "deterministic_train_and_eval": true},
+  "loss": {"kd_weight": 0.2, "kd_temp": 2.0, "l1_weight": 0.01, "note": "SAME kd+regularizer for stochastic and DLR (fairness)"}
+}

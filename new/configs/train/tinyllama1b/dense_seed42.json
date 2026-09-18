@@ -1,0 +1,9 @@
+{
+  "run_id": "tinyllama1b_dense_seed42",
+  "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "variant": "dense",
+  "seed": 42,
+  "max_steps": 150,
+  "batch_size": 4,
+  "command": "python new/experiments/train.py --variant dense --seed 42 --run-id tinyllama1b_dense_seed42 --max-steps 150"
+}

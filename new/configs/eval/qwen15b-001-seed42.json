@@ -1,0 +1,79 @@
+{
+  "attention_implementation": "sdpa",
+  "batch_size": 8,
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "eval_run_id": "qwen15b-001-seed42",
+  "limit": 100,
+  "max_length": 1024,
+  "model_family": "qwen15b",
+  "model_id": "Qwen/Qwen2.5-1.5B",
+  "num_fewshot": 0,
+  "output_dir": "artifacts/evals",
+  "perplexity": {
+    "config": "wikitext-103-raw-v1",
+    "dataset": "Salesforce/wikitext",
+    "enabled": true,
+    "max_length": 128,
+    "samples": 50,
+    "split": "validation"
+  },
+  "tasks": [
+    "arc_challenge",
+    "hellaswag",
+    "winogrande"
+  ],
+  "variants": [
+    {
+      "checkpoint": "new/artifacts/runs/qwen15b_dense_500_seed42",
+      "name": "dense",
+      "type": "lora"
+    },
+    {
+      "always_keep_layers": 4,
+      "checkpoint": "new/artifacts/runs/qwen15b_stochastic_30_500_seed42",
+      "eval_seed": 1234,
+      "name": "stochastic_30",
+      "skip_prob": 0.3,
+      "type": "stochastic"
+    },
+    {
+      "always_keep_layers": 4,
+      "checkpoint": "new/artifacts/runs/qwen15b_token_dlr_30_sw1600_500_seed42",
+      "name": "token_dlr_30",
+      "router_weights": "new/artifacts/runs/qwen15b_token_dlr_30_sw1600_500_seed42/router_weights.pt",
+      "type": "token_dlr"
+    },
+    {
+      "always_keep_layers": 4,
+      "checkpoint": "new/artifacts/runs/qwen15b_stochastic_50_500_seed42",
+      "eval_seed": 1234,
+      "name": "stochastic_50",
+      "skip_prob": 0.5,
+      "type": "stochastic"
+    },
+    {
+      "always_keep_layers": 4,
+      "checkpoint": "new/artifacts/runs/qwen15b_token_dlr_50_sw1600_500_seed42",
+      "name": "token_dlr_50",
+      "router_weights": "new/artifacts/runs/qwen15b_token_dlr_50_sw1600_500_seed42/router_weights.pt",
+      "type": "token_dlr"
+    },
+    {
+      "always_keep_layers": 4,
+      "checkpoint": "new/artifacts/runs/qwen15b_dense_500_seed42",
+      "eval_seed": 1234,
+      "name": "random_20",
+      "skip_prob": 0.2,
+      "type": "stochastic"
+    },
+    {
+      "always_keep_layers": 4,
+      "checkpoint": "new/artifacts/runs/qwen15b_dense_500_seed42",
+      "eval_seed": 1234,
+      "name": "random_35",
+      "skip_prob": 0.35,
+      "type": "stochastic"
+    }
+  ]
+}

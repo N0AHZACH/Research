@@ -1,0 +1,84 @@
+{
+  "attention_implementation": "sdpa",
+  "batch_size": 2,
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "eval_run_id": "tinyllama1b-paper-seed42",
+  "limit": null,
+  "max_length": 1024,
+  "model_family": "tinyllama1b",
+  "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "num_fewshot": 5,
+  "output_dir": "artifacts/evals",
+  "perplexity": {
+    "config": "wikitext-103-raw-v1",
+    "dataset": "Salesforce/wikitext",
+    "enabled": true,
+    "max_length": 512,
+    "samples": 500,
+    "split": "validation"
+  },
+  "tasks": [
+    "arc_challenge",
+    "hellaswag",
+    "winogrande",
+    "mmlu"
+  ],
+  "variants": [
+    {
+      "name": "base",
+      "type": "base"
+    },
+    {
+      "checkpoint": "new/artifacts/runs/tinyllama1b_dense_500_seed42",
+      "name": "dense",
+      "type": "lora"
+    },
+    {
+      "always_keep_layers": 3,
+      "checkpoint": "new/artifacts/runs/tinyllama1b_stochastic_30_500_seed42",
+      "eval_seed": 1234,
+      "name": "stochastic_30",
+      "skip_prob": 0.3,
+      "type": "stochastic"
+    },
+    {
+      "always_keep_layers": 3,
+      "checkpoint": "new/artifacts/runs/tinyllama1b_token_dlr_30_sw1600_500_seed42",
+      "name": "token_dlr_30",
+      "router_weights": "new/artifacts/runs/tinyllama1b_token_dlr_30_sw1600_500_seed42/router_weights.pt",
+      "type": "token_dlr"
+    },
+    {
+      "always_keep_layers": 3,
+      "checkpoint": "new/artifacts/runs/tinyllama1b_stochastic_50_500_seed42",
+      "eval_seed": 1234,
+      "name": "stochastic_50",
+      "skip_prob": 0.5,
+      "type": "stochastic"
+    },
+    {
+      "always_keep_layers": 3,
+      "checkpoint": "new/artifacts/runs/tinyllama1b_token_dlr_50_sw1600_500_seed42",
+      "name": "token_dlr_50",
+      "router_weights": "new/artifacts/runs/tinyllama1b_token_dlr_50_sw1600_500_seed42/router_weights.pt",
+      "type": "token_dlr"
+    },
+    {
+      "always_keep_layers": 3,
+      "checkpoint": "new/artifacts/runs/tinyllama1b_dense_500_seed42",
+      "eval_seed": 1234,
+      "name": "random_lo",
+      "skip_prob": 0.19,
+      "type": "stochastic"
+    },
+    {
+      "always_keep_layers": 3,
+      "checkpoint": "new/artifacts/runs/tinyllama1b_dense_500_seed42",
+      "eval_seed": 1234,
+      "name": "random_hi",
+      "skip_prob": 0.37,
+      "type": "stochastic"
+    }
+  ]
+}

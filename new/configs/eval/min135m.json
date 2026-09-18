@@ -1,0 +1,52 @@
+{
+  "eval_run_id": "min135m-001",
+  "model_family": "min135m",
+  "model_id": "HuggingFaceTB/SmolLM2-135M",
+  "output_dir": "artifacts/evals",
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "attention_implementation": "sdpa",
+  "tasks": [
+    "arc_challenge",
+    "hellaswag",
+    "winogrande"
+  ],
+  "num_fewshot": 0,
+  "batch_size": 8,
+  "limit": 100,
+  "max_length": 1024,
+  "perplexity": {
+    "enabled": true,
+    "dataset": "Salesforce/wikitext",
+    "config": "wikitext-103-raw-v1",
+    "split": "validation",
+    "samples": 50,
+    "max_length": 128
+  },
+  "variants": [
+    {
+      "name": "base",
+      "type": "base"
+    },
+    {
+      "name": "dense",
+      "type": "lora",
+      "checkpoint": "new/artifacts/runs/min135m_dense_seed42"
+    },
+    {
+      "name": "stochastic_30",
+      "type": "stochastic",
+      "checkpoint": "new/artifacts/runs/min135m_stochastic_30_seed42",
+      "skip_prob": 0.3,
+      "eval_seed": 1234,
+      "always_keep_layers": 4
+    },
+    {
+      "name": "token_dlr_30",
+      "type": "token_dlr",
+      "checkpoint": "new/artifacts/runs/min135m_token_dlr_30_seed42",
+      "router_weights": "new/artifacts/runs/min135m_token_dlr_30_seed42/router_weights.pt",
+      "always_keep_layers": 4
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "run_id": "tinyllama1b_token_dlr_50_seed42",
+  "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "variant": "token_dlr_50",
+  "target_skip": 0.5,
+  "seed": 42,
+  "max_steps": 150,
+  "batch_size": 4,
+  "kd_weight": 0.2,
+  "skip_weight": 400.0,
+  "l1_weight": 0.01,
+  "harness_measured_skip": 0.247,
+  "harness_measured_note": "BELOW 45-55% band; Pareto calibration still required",
+  "command": "python new/experiments/train.py --variant token_dlr_50 --seed 42 --run-id tinyllama1b_token_dlr_50_seed42 --max-steps 150"
+}

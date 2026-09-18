@@ -1,0 +1,12 @@
+# Pinned to the proven working env (RTX 4060, torch 2.6.0+cu124, 2026-09-15).
+# Install torch FIRST via the CUDA index (see 00_setup_gpu.sh/ps1), then this file.
+transformers==5.7.0
+peft==0.19.1
+datasets==4.8.5
+accelerate==1.13.0
+lm-eval==0.4.11
+bitsandbytes==0.49.2
+safetensors
+huggingface_hub
+scipy
+scikit-learn

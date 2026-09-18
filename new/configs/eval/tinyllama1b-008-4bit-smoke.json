@@ -1,0 +1,29 @@
+{
+  "eval_run_id": "tinyllama1b-008-4bit-smoke",
+  "model_family": "tinyllama1b",
+  "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "output_dir": "artifacts/evals",
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "attention_implementation": "sdpa",
+  "quantization": "4bit",
+  "tasks": [],
+  "num_fewshot": 0,
+  "batch_size": 2,
+  "limit": 100,
+  "max_length": 1024,
+  "perplexity": {
+    "enabled": true,
+    "dataset": "Salesforce/wikitext",
+    "config": "wikitext-103-raw-v1",
+    "split": "validation",
+    "samples": 10,
+    "max_length": 128
+  },
+  "variants": [
+    {
+      "name": "base_4bit",
+      "type": "base"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "eval_run_id": "example-dry-run",
+  "model_family": "example",
+  "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "output_dir": "artifacts/evals",
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "attention_implementation": "sdpa",
+  "tasks": ["arc_challenge"],
+  "num_fewshot": 5,
+  "batch_size": 1,
+  "limit": 10,
+  "perplexity": {
+    "enabled": true,
+    "dataset": "Salesforce/wikitext",
+    "config": "wikitext-103-raw-v1",
+    "split": "validation",
+    "samples": 10,
+    "max_length": 512
+  },
+  "variants": [
+    {
+      "name": "base",
+      "type": "base"
+    }
+  ]
+}

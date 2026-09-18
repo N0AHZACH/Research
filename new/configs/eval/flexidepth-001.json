@@ -1,0 +1,42 @@
+{
+  "eval_run_id": "flexidepth-001",
+  "model_family": "llama3_8b_flexidepth",
+  "model_id": "xuan-luo/FlexiDepth-Llama-3-8B-Instruct",
+  "output_dir": "artifacts/evals",
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "attention_implementation": "sdpa",
+  "quantization": "4bit",
+  "trust_remote_code": true,
+  "tasks": [
+    "arc_challenge",
+    "hellaswag",
+    "winogrande"
+  ],
+  "num_fewshot": 0,
+  "batch_size": 2,
+  "limit": 100,
+  "max_length": 1024,
+  "perplexity": {
+    "enabled": true,
+    "dataset": "Salesforce/wikitext",
+    "config": "wikitext-103-raw-v1",
+    "split": "validation",
+    "samples": 50,
+    "max_length": 128
+  },
+  "variants": [
+    {
+      "name": "flexidepth",
+      "type": "base"
+    },
+    {
+      "name": "flexidepth_random_p50_last16",
+      "type": "base_stochastic",
+      "skip_prob": 0.5,
+      "eval_seed": 1234,
+      "always_keep_layers": 16
+    }
+  ],
+  "_note": "Inference-only audit. FlexiDepth paper (COLM 2025): latter 16/32 Llama-3-8B-Instruct layers converted, ~8/32 skipped at full benchmark perf. Random control drops 50% of the same last-16 layers (expected total skip 8/32) on the SAME checkpoint: learned-vs-random on identical weights. 4-bit (nf4) — note as precision caveat. Their eval suite differs from ours (0-shot ARC/Hella/Wino here); comparison is directional, not a replication."
+}

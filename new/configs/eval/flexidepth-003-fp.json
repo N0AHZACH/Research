@@ -1,0 +1,41 @@
+{
+  "_note": "Full-precision rerun of flexidepth-001/002 (no 4-bit caveat). Random control drops 50% of the same last-16 converted layers on the SAME ckpt: learned-vs-random on identical 8B weights.",
+  "attention_implementation": "sdpa",
+  "batch_size": 4,
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "eval_run_id": "flexidepth-003-fp",
+  "limit": 100,
+  "max_length": 1024,
+  "model_family": "llama3_8b_flexidepth",
+  "model_id": "xuan-luo/FlexiDepth-Llama-3-8B-Instruct",
+  "num_fewshot": 0,
+  "output_dir": "artifacts/evals",
+  "perplexity": {
+    "config": "wikitext-103-raw-v1",
+    "dataset": "Salesforce/wikitext",
+    "enabled": true,
+    "max_length": 128,
+    "samples": 50,
+    "split": "validation"
+  },
+  "tasks": [
+    "arc_challenge",
+    "hellaswag",
+    "winogrande"
+  ],
+  "trust_remote_code": true,
+  "variants": [
+    {
+      "name": "flexidepth",
+      "type": "base"
+    },
+    {
+      "always_keep_layers": 16,
+      "eval_seed": 1234,
+      "name": "flexidepth_random_p50_last16",
+      "skip_prob": 0.5,
+      "type": "base_stochastic"
+    }
+  ]
+}

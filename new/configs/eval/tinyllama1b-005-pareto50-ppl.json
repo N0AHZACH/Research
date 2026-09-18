@@ -1,0 +1,38 @@
+{
+  "eval_run_id": "tinyllama1b-005-pareto50-ppl",
+  "model_family": "tinyllama1b",
+  "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "output_dir": "artifacts/evals",
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "attention_implementation": "sdpa",
+  "tasks": [],
+  "num_fewshot": 0,
+  "batch_size": 8,
+  "limit": 100,
+  "max_length": 1024,
+  "perplexity": {
+    "enabled": true,
+    "dataset": "Salesforce/wikitext",
+    "config": "wikitext-103-raw-v1",
+    "split": "validation",
+    "samples": 50,
+    "max_length": 128
+  },
+  "variants": [
+    {
+      "name": "dlr50_sw800",
+      "type": "token_dlr",
+      "checkpoint": "new/artifacts/runs/tinyllama1b_token_dlr_50_sw800_seed42",
+      "router_weights": "new/artifacts/runs/tinyllama1b_token_dlr_50_sw800_seed42/router_weights.pt",
+      "always_keep_layers": 3
+    },
+    {
+      "name": "dlr50_sw1600",
+      "type": "token_dlr",
+      "checkpoint": "new/artifacts/runs/tinyllama1b_token_dlr_50_sw1600_seed42",
+      "router_weights": "new/artifacts/runs/tinyllama1b_token_dlr_50_sw1600_seed42/router_weights.pt",
+      "always_keep_layers": 3
+    }
+  ]
+}

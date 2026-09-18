@@ -1,0 +1,31 @@
+{
+  "eval_run_id": "tinyllama1b-009-basestoch-smoke",
+  "model_family": "tinyllama1b",
+  "model_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "output_dir": "artifacts/evals",
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "attention_implementation": "sdpa",
+  "tasks": [],
+  "num_fewshot": 0,
+  "batch_size": 8,
+  "limit": 100,
+  "max_length": 1024,
+  "perplexity": {
+    "enabled": true,
+    "dataset": "Salesforce/wikitext",
+    "config": "wikitext-103-raw-v1",
+    "split": "validation",
+    "samples": 10,
+    "max_length": 128
+  },
+  "variants": [
+    {
+      "name": "base_random_25",
+      "type": "base_stochastic",
+      "skip_prob": 0.25,
+      "eval_seed": 1234,
+      "always_keep_layers": 3
+    }
+  ]
+}
