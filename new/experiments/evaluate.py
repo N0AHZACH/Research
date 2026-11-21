@@ -436,7 +436,7 @@ class StopForward(Exception):
     pass
 
 
-def routed_forward(torch, loaded: LoadedVariant, input_ids, attention_mask=None, labels=None):
+def routed_forward(torch, loaded: LoadedVariant, input_ids, attention_mask=None, labels=None, gate_transform=None):
     model = loaded.model
     router = loaded.router
     always_keep = int(loaded.always_keep_layers or 0)
@@ -471,6 +471,9 @@ def routed_forward(torch, loaded: LoadedVariant, input_ids, attention_mask=None,
 
     if gates.dim() != 3:
         raise RuntimeError(f"{loaded.name}: expected token gates [B,S,L], got {tuple(gates.shape)}")
+
+    if gate_transform is not None:
+        gates = gate_transform(gates, attention_mask)
 
     for layer_i, layer in enumerate(layers[always_keep:]):
         def gate_hook(module, inputs, output, li=layer_i):
@@ -516,7 +519,7 @@ def routing_metrics_from_gates(gates_list: List[Any], always_keep: int) -> Dict[
     return canonical(gates, always_keep)
 
 
-def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any], gate_transform=None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     torch, _, _, load_dataset, _, DataLoader, _, _ = import_torch_stack()
     ppl_cfg = manifest.get("perplexity", {})
     device = manifest.get("device", "cuda" if torch.cuda.is_available() else "cpu")
@@ -540,7 +543,7 @@ def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any]) -> Tupl
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
 
     loaded.model.eval()
-    losses = []
+    total_nll = 0.0
     token_count = 0
     gates_list = []
     stochastic_mask = None
@@ -567,7 +570,8 @@ def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any]) -> Tupl
             stochastic_mask = maybe_mask
             for batch in loader:
                 batch = {k: v.to(device) for k, v in batch.items() if hasattr(v, "to")}
-                token_count += int((batch["labels"] != -100).sum().item())
+                scored = int((batch["labels"][:, 1:] != -100).sum().item())
+                token_count += scored
                 if loaded.type == "token_dlr":
                     outputs, gates = routed_forward(
                         torch,
@@ -575,8 +579,10 @@ def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any]) -> Tupl
                         input_ids=batch["input_ids"],
                         attention_mask=batch.get("attention_mask"),
                         labels=batch.get("labels"),
+                        gate_transform=gate_transform,
                     )
-                    gates_list.append(gates)
+                    valid = batch["attention_mask"].bool().cpu()
+                    gates_list.append(gates[valid].unsqueeze(1))
                 else:
                     outputs = loaded.model(
                         input_ids=batch["input_ids"],
@@ -591,7 +597,7 @@ def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any]) -> Tupl
                             len(stochastic_mask),
                         )
                         gates_list.append(m)
-                losses.append(float(outputs.loss.item()))
+                total_nll += float(outputs.loss.item()) * scored
             routing = routing_metrics_from_gates(gates_list, int(loaded.always_keep_layers or 0))
             if loaded.type == "stochastic" and routing:
                 # Fixed coin-flip masks have ~0 entropy by construction; the
@@ -599,7 +605,9 @@ def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any]) -> Tupl
                 routing["collapse_flag"] = "n/a (fixed mask)"
 
     elapsed = max(time.perf_counter() - started, 1e-9)
-    avg_loss = sum(losses) / max(1, len(losses))
+    if not token_count:
+        raise ValueError("Perplexity requires scored next-token targets")
+    avg_loss = total_nll / token_count
     ppl_result = {
         "variant": loaded.name,
         "dataset": dataset_name,

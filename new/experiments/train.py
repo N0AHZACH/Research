@@ -62,6 +62,7 @@ def main():
     p.add_argument("--l1-weight", type=float, default=0.01)
     p.add_argument("--kd-temp", type=float, default=2.0)
     p.add_argument("--tau", type=float, default=2.0)
+    p.add_argument("--expanded-lora", action="store_true", help="Include MLP projections for control variants")
     args = p.parse_args()
 
     variant = canonical_variant(args.variant)
@@ -75,7 +76,7 @@ def main():
     set_seed(args.seed)
     tok = load_tokenizer(args.model_id)
     model = load_base_model(args.model_id, dtype=dtype, device=device)
-    model = wrap_lora(model, rank=8, alpha=16, expanded=variant.startswith("token_dlr"))
+    model = wrap_lora(model, rank=8, alpha=16, expanded=args.expanded_lora or variant.startswith("token_dlr"))
 
     total_layers = base_total_layers(model)
     ak = always_keep_layers(total_layers)
