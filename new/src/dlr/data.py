@@ -1,5 +1,6 @@
 """WikiText packing for min prototype. Train + held-out eval split."""
 from dataclasses import dataclass
+from itertools import islice
 from typing import Optional
 
 import torch
@@ -16,6 +17,7 @@ class DataConfig:
     num_lines: Optional[int] = 300
     min_char_len: int = 100
     eval_blocks: int = 50
+    revision: Optional[str] = None
 
 
 class PackedTextDataset(Dataset):
@@ -31,9 +33,8 @@ class PackedTextDataset(Dataset):
 
 
 def load_packed_ids(tokenizer, cfg: DataConfig):
-    ds = load_dataset(cfg.dataset_name, cfg.dataset_config, split=cfg.split)
-    texts = [t for t in ds["text"] if len(t) > cfg.min_char_len]
-    texts = texts[: cfg.num_lines]
+    ds = load_dataset(cfg.dataset_name, cfg.dataset_config, split=cfg.split, revision=cfg.revision)
+    texts = list(islice((row["text"] for row in ds if len(row["text"]) > cfg.min_char_len), cfg.num_lines))
     if not texts:
         raise ValueError("No text survived filtering.")
     enc = tokenizer("\n\n".join(texts), return_tensors=None)["input_ids"]

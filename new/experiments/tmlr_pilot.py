@@ -3,7 +3,10 @@ import argparse
 import json
 from pathlib import Path
 
-import evaluate as ev
+if __package__:
+    from . import evaluate as ev
+else:
+    import evaluate as ev
 
 
 def shuffled_routes(torch, seed):
@@ -17,14 +20,17 @@ def shuffled_routes(torch, seed):
             if len(rows) > 1:
                 order = rows[torch.randperm(len(rows), generator=generator)].to(gates.device)
                 result[order, pos] = gates[order.roll(1), pos]
+        shuffle.changed += int(((result != gates).any(dim=-1) & mask.bool()).sum().item())
+        shuffle.total += int(mask.sum().item())
         return result
 
+    shuffle.changed = shuffle.total = 0
     return shuffle
 
 
 def check_forward(torch, loaded):
     loaded.model.eval()
-    ids = loaded.tokenizer("A quick check of the routing implementation.", return_tensors="pt").input_ids.to("cuda")
+    ids = loaded.tokenizer("A quick check of the routing implementation.", return_tensors="pt").input_ids.to(next(loaded.model.parameters()).device)
     mask = torch.ones_like(ids)
     pad_ids = torch.nn.functional.pad(ids, (0, 8), value=loaded.tokenizer.pad_token_id)
     pad_mask = torch.nn.functional.pad(mask, (0, 8))

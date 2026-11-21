@@ -424,6 +424,7 @@ def load_variant(manifest: Dict[str, Any], variant: Dict[str, Any]) -> LoadedVar
     model = peft_model.merge_and_unload()
     out = LoadedVariant(variant["name"], variant["type"], model, tokenizer)
     if variant["type"] == "stochastic":
+        out.keep_mask = variant.get("keep_mask")
         # Fixed seeded mask at eval (deterministic, documented). Without this,
         # stochastic rows would silently evaluate at full depth.
         out.skip_prob = float(variant.get("skip_prob", 0.3))
@@ -496,7 +497,7 @@ def routed_forward(torch, loaded: LoadedVariant, input_ids, attention_mask=None,
     return outputs, gates.detach().cpu()
 
 
-def tokenize_for_ppl(tokenizer, batch: Dict[str, List[str]], max_length: int) -> Dict[str, Any]:
+def tokenize_for_ppl(batch: Dict[str, List[str]], tokenizer, max_length: int) -> Dict[str, Any]:
     out = tokenizer(batch["text"], truncation=True, padding="max_length", max_length=max_length)
     labels = [list(ids) for ids in out["input_ids"]]
     for i, mask in enumerate(out["attention_mask"]):
@@ -531,11 +532,15 @@ def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any], gate_tr
     batch_size = int(manifest.get("batch_size", 1))
 
     print(f"  Perplexity: {dataset_name}/{dataset_config} {split}, samples={samples}")
-    raw = load_dataset(dataset_name, dataset_config, split=split)
+    raw = load_dataset(dataset_name, dataset_config, split=split, revision=ppl_cfg.get("revision"))
     raw = raw.filter(lambda x: len(x["text"]) > 100)
     raw = raw.select(range(min(samples, len(raw))))
+    examples = []
+    if manifest.get("log_samples"):
+        example_ids = [hashlib.sha256(t.encode()).hexdigest() for t in raw["text"]]
     ds = raw.map(
-        lambda b: tokenize_for_ppl(loaded.tokenizer, b, max_length),
+        tokenize_for_ppl,
+        fn_kwargs={"tokenizer": loaded.tokenizer, "max_length": max_length},
         batched=True,
         remove_columns=raw.column_names,
     )
@@ -554,7 +559,7 @@ def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any], gate_tr
             loaded.model,
             int(getattr(loaded, "always_keep_layers", 0) or 0),
             float(getattr(loaded, "skip_prob", 0.3)),
-            int(getattr(loaded, "eval_seed", 1234)),
+            int(getattr(loaded, "eval_seed", 1234)), getattr(loaded, "keep_mask", None),
         )
         if loaded.type == "stochastic"
         else None
@@ -597,7 +602,16 @@ def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any], gate_tr
                             len(stochastic_mask),
                         )
                         gates_list.append(m)
-                total_nll += float(outputs.loss.item()) * scored
+                if manifest.get("log_samples"):
+                    targets = batch["labels"][:, 1:]
+                    nll = torch.nn.functional.cross_entropy(outputs.logits[:, :-1].float().transpose(1, 2),
+                                                            targets, reduction="none")
+                    counts = (targets != -100).sum(dim=1).tolist()
+                    for value, count in zip(nll.sum(dim=1).tolist(), counts):
+                        examples.append([example_ids[len(examples)], count, value])
+                    total_nll += float(nll.sum().item())
+                else:
+                    total_nll += float(outputs.loss.item()) * scored
             routing = routing_metrics_from_gates(gates_list, int(loaded.always_keep_layers or 0))
             if loaded.type == "stochastic" and routing:
                 # Fixed coin-flip masks have ~0 entropy by construction; the
@@ -620,6 +634,8 @@ def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any], gate_tr
         "perplexity": math.exp(avg_loss),
         "tokens_per_sec": token_count / elapsed,
     }
+    if examples:
+        ppl_result["examples"] = examples
     return ppl_result, routing
 
 
@@ -648,13 +664,16 @@ def run_lm_eval(loaded: LoadedVariant, manifest: Dict[str, Any]) -> Dict[str, An
             max_length=int(manifest.get("max_length", 2048)),
             device=device,
         )
-        return evaluator.simple_evaluate(
+        result = evaluator.simple_evaluate(
             model=lm,
             tasks=manifest["tasks"],
             num_fewshot=int(manifest["num_fewshot"]),
             limit=manifest.get("limit"),
             log_samples=bool(manifest.get("log_samples", False)),
         )
+
+        result["routing_summary"] = _gate_acc.summary(loaded.always_keep_layers)
+        return result
 
     if loaded.type == "stochastic":
         ak = int(getattr(loaded, "always_keep_layers", 0) or 0)
@@ -664,7 +683,7 @@ def run_lm_eval(loaded: LoadedVariant, manifest: Dict[str, Any]) -> Dict[str, An
                 "(refusing silent full-depth fallback)"
             )
         with fixed_mask_fn(loaded.model, ak, float(getattr(loaded, "skip_prob", 0.3)),
-                            int(getattr(loaded, "eval_seed", 1234))):
+                            int(getattr(loaded, "eval_seed", 1234)), getattr(loaded, "keep_mask", None)):
             return _run_hflm(HFLM, evaluator, loaded, manifest)
 
     return _run_hflm(HFLM, evaluator, loaded, manifest)

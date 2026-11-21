@@ -38,7 +38,8 @@ def eval_ppl(model, router, eval_ds, cfg, collate_fn):
         elif is_stochastic:
             handles = []
             for li in range(cfg.always_keep, len(layers)):
-                keep = (torch.rand(1, generator=g).item() > cfg.target_skip)
+                keep = (cfg.fixed_mask[li - cfg.always_keep] if getattr(cfg, "fixed_mask", None) is not None
+                        else torch.rand(1, generator=g).item() > cfg.target_skip)
                 gate = torch.full((ids.shape[0], ids.shape[1]), float(keep), device=ids.device)
                 handles.append(layers[li].register_forward_hook(make_gate_hook(gate)))
             try:
@@ -70,7 +71,9 @@ def train(model, router, train_ds, eval_ds, cfg, collate_fn):
     if router is not None:
         train_params += [p for p in router.parameters() if p.requires_grad]
     optim = torch.optim.AdamW(train_params, lr=cfg.lr)
-    loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_fn)
+    loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_fn,
+                        generator=(torch.Generator().manual_seed(cfg.data_seed)
+                                   if hasattr(cfg, "data_seed") else None))
     total_steps = cfg.max_steps
     sched = get_cosine_schedule_with_warmup(optim, num_warmup_steps=cfg.warmup_steps,
                                             num_training_steps=max(total_steps, 1))
@@ -97,7 +100,9 @@ def train(model, router, train_ds, eval_ds, cfg, collate_fn):
         elif cfg.variant_type.startswith("stochastic"):
             handles = []
             R = len(layers) - cfg.always_keep
-            coin = (torch.rand(R, device=device) > cfg.target_skip).float()  # 1=keep
+            coin = (torch.tensor(cfg.fixed_mask, device=device, dtype=torch.float32)
+                    if getattr(cfg, "fixed_mask", None) is not None
+                    else (torch.rand(R, device=device) > cfg.target_skip).float())  # 1=keep
             gates = coin.view(1, 1, R).expand(ids.shape[0], ids.shape[1], R)
             for i, li in enumerate(range(cfg.always_keep, len(layers))):
                 gate_bs = gates[:, :, i]

@@ -63,10 +63,13 @@ def main():
     p.add_argument("--kd-temp", type=float, default=2.0)
     p.add_argument("--tau", type=float, default=2.0)
     p.add_argument("--expanded-lora", action="store_true", help="Include MLP projections for control variants")
+    p.add_argument("--fixed-mask", type=json.loads, help="JSON keep bits for static-policy training")
+    p.add_argument("--target-skip", type=float)
+    p.add_argument("--data-revision")
     args = p.parse_args()
 
     variant = canonical_variant(args.variant)
-    target_skip = target_for(variant)
+    target_skip = target_for(variant) if args.target_skip is None else args.target_skip
 
     if not torch.cuda.is_available():
         print("WARNING: CUDA not available — running on CPU.")
@@ -82,6 +85,9 @@ def main():
     ak = always_keep_layers(total_layers)
     print(f"model={args.model_id} layers={total_layers} always_keep={ak} device={device} dtype={dtype}")
 
+    if args.fixed_mask is not None and (not variant.startswith("stochastic") or
+            len(args.fixed_mask) != total_layers - ak or any(x not in (0, 1) for x in args.fixed_mask)):
+        p.error("fixed-mask requires a stochastic variant and one binary entry per routable layer")
     if args.smoke:
         dc = DataConfig(num_lines=40, max_length=128, eval_blocks=10)
         max_steps, bs = 20, 2
@@ -89,6 +95,9 @@ def main():
         dc = DataConfig(num_lines=300, max_length=128, eval_blocks=50)
         max_steps, bs = args.max_steps, args.batch_size
 
+    if args.data_revision:
+        dc.dataset_name = "Salesforce/wikitext"
+        dc.revision = args.data_revision
     train_ds, eval_ds = build_train_eval(tok, dc)
     print(f"train_blocks={len(train_ds)} eval_blocks={len(eval_ds)}")
 
@@ -98,7 +107,7 @@ def main():
         router = RouterMLP(hs, total_layers - ak).to(device)
 
     cfg = SimpleNamespace(
-        variant_type=variant, device=device, batch_size=bs, lr=args.lr,
+        variant_type=variant, data_seed=args.seed, fixed_mask=args.fixed_mask, data_revision=args.data_revision, device=device, batch_size=bs, lr=args.lr,
         max_steps=max_steps, warmup_steps=min(10, max_steps // 5),
         always_keep=ak, target_skip=target_skip,
         tau=args.tau, router_deterministic=True,

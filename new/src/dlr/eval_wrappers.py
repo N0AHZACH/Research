@@ -22,12 +22,16 @@ GENERATE_UNTIL_TASKS = {
 
 
 @contextmanager
-def fixed_stochastic_mask(model, always_keep: int, skip_prob: float, seed: int = 1234):
+def fixed_stochastic_mask(model, always_keep: int, skip_prob: float, seed: int = 1234, keep_mask=None):
     """Install one seeded coin-flip mask per routable layer for the duration."""
     layers = get_layers(model)
     g = torch.Generator().manual_seed(seed)
     R = len(layers) - always_keep
     coin = (torch.rand(R, generator=g) > skip_prob).float()
+    if keep_mask is not None:
+        if len(keep_mask) != R or any(x not in (0, 1) for x in keep_mask):
+            raise ValueError("Invalid fixed mask")
+        coin = torch.tensor(keep_mask)
     real_handles = []
     for li, keep in enumerate(coin.tolist(), start=always_keep):
         keep_t = torch.tensor(float(keep))
@@ -72,6 +76,7 @@ class RoutedHFLM:
         outer = RoutedHFLM()
 
         class _Routed(HFLM):
+            @torch.no_grad()
             def _model_call(self, inps, attn_mask=None, labels=None):
                 if attn_mask is None:
                     attn_mask = torch.ones_like(inps)
