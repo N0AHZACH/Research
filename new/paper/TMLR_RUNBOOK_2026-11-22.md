@@ -1,6 +1,6 @@
 # Run the TMLR routing study on Windows · 22 November 2026
 
-**Use this file for the complete study.** The older undated runbook describes the exploratory pilot. This version trains fresh checkpoints, evaluates the learned, shuffled, dense, fixed and stochastic policies, and generates the analysis files. An old checkpoint is optional for the older pilot and unnecessary here.
+This runbook covers the validation pilot and the complete study. The runner trains fresh checkpoints and produces paired comparisons for the learned router, two shuffle controls, dense LoRA, trained fixed policies, and random masks.
 
 ## 1. Install once
 
@@ -31,7 +31,7 @@ Continue after the setup prints **Windows setup and smoke test passed**. It uses
 
 The offline smoke test exercises tiny randomly initialized Llama and Qwen2 models. It checks one training step each for a static and learned policy, checkpoint reload, padding, gates, next-token loss and the likelihood-task forward path. Passing it means the small numerical paths work in your environment. The real-model pilot is the next check.
 
-**Verification at handoff (Linux host).** The CPU smoke passed using torch 2.6.0 and the pinned Transformers, PEFT, datasets and lm-eval versions. A synthetic six-job result set generated all four CSVs and the PDF. All eight PowerShell command blocks passed a parser check. The pilot-display and checksum blocks ran against sample artifacts. Native Windows setup, CUDA performance and the real-model results still require the runs below.
+The CPU smoke also checks that whole-sequence swaps preserve per-layer usage, that passages return in their original order after length-matched batching, and that paired statistics use the same batch assignments. Use the real-model pilot below to verify the study on your GPU.
 
 ## 2. Start small
 
@@ -42,16 +42,13 @@ Open PowerShell in the repository root for each session. Every command below sel
 .\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study pilot
 ```
 
-The output directory is `new/artifacts/tmlr-2026-11-22/`. Back it up together with your model cache. `protocol.json` records the source commit, package versions, model and WikiText revisions, split row indices and text hashes. Freeze uses the revisions available at first execution. Share this exact file for replication. Inspect the pilot:
+The output directory is `new/artifacts/tmlr-routing-controls/`. Earlier runs have a separate output directory. Back up this directory and the model cache. `protocol.json` records the source commit, package versions, model and WikiText revisions, split row indices and text hashes. Freeze uses the revisions available at first execution. The pilot trains one learned router, a dense checkpoint and the fixed policies that bracket the learned depth, then evaluates only on WikiText validation. Inspect its summary:
 
 ```powershell
-Get-ChildItem .\new\artifacts\tmlr-2026-11-22\tiny-42\pilot_*.json | ForEach-Object {
-    $row = Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json
-    [pscustomobject]@{ Arm = $_.BaseName; PPL = $row.ppl.perplexity; Skip = $row.routing.achieved_skip; ChangedFraction = $row.changed_fraction }
-}
+Get-Content .\new\artifacts\tmlr-routing-controls\tiny-42\pilot_summary.json
 ```
 
-Each shuffle preserves native per-layer activity. If few routes change, the intervention has little power to detect an assignment effect. Inspect this before using paid compute. A weak or reversed effect is a valid result. Keep the output.
+Each shuffle must preserve native per-layer activity. `eligible_fraction` is the fraction of valid tokens that have a donor under that shuffle. `changed_fraction` is the fraction of valid tokens that actually received a different route. Low coverage or little route variation limits what a weak effect can establish. Negative `native_minus_nll` favors native routing. Use the pilot to check the controls, the fixed-policy depths and actual resource use before starting the full sweep. Keep the output whatever the result.
 
 ## 3. Finish at your pace
 
@@ -78,17 +75,17 @@ Run one process per output directory. Each completed training job or evaluation 
 
 ## 4. What the study measures
 
-- **Scope.** Small-data LoRA adaptation on TinyLlama‑1.1B‑Chat and Qwen2.5‑1.5B. First 300 training passages longer than 100 characters, 128-token packing, final 50 packed blocks held out where available. All variants get expanded rank-8 LoRA, 500 updates, batch four, and the same seed-specific training order. Dense is the full-depth LoRA reference. The routed controls share the teacher and distillation settings. Two target skip fractions, 0.30 and 0.50, are labels. Report measured skip over routable layers.
-- **Calibration.** On the first 50 qualifying WikiText validation passages, bypass each candidate layer of the dense adapted model in turn. Rank by lowest single-deletion NLL. For each learned operating point, train fixed policies dropping the floor and ceiling of its measured mean dropped-layer count. This is a reproducible static heuristic. Joint optimization over all subsets could yield a stronger policy.
-- **Random controls.** Train a stochastic policy at the learned validation skip probability. Evaluate three fixed random subsets with the nearest integer count. The token-assignment intervention separately shuffles full route vectors across valid examples at the same position within batches of four, with three predeclared draws on the learned checkpoint.
+- **Scope.** Small-data LoRA adaptation on TinyLlama‑1.1B‑Chat and Qwen2.5‑1.5B. First 300 training passages longer than 100 characters, 128-token packing, final 50 packed blocks held out where available. All variants get expanded rank-8 LoRA, 500 updates, batch four, and the same seed-specific training order. Evaluate all variants with adapters kept separate from the base weights to use the same adapter arithmetic. Dense is the full-depth LoRA reference. The routed controls share the teacher and distillation settings. Two target skip fractions, 0.30 and 0.50, are labels. Report measured skip over routable layers.
+- **Calibration.** Rank single-layer deletions by NLL on the first 50 qualifying WikiText validation passages using the dense LoRA checkpoint. For each integer depth that brackets a learned operating point, score the top-ranked deletion set and up to 12 alternatives that each exchange one of the last three selected layers for one of the next four in the ranking. Train the lowest-NLL policy at each depth. This searches combinations of deletions within a bounded candidate set.
+- **Routing controls.** Use the same length-matched batch schedule for all WikiText arms. One shuffle swaps route vectors across passages independently at each valid position. The second swaps whole trajectories between passages with identical valid positions, preserving the order of routes within each donor trajectory. In both cases, three predeclared draws permute the learned checkpoint's routes while preserving per-layer activity. Separately, train a stochastic policy at the learned validation skip probability and evaluate three fixed random subsets at the nearest integer depth.
 - **Primary endpoint.** Mean next-token NLL weighted by scored tokens on the first 500 qualifying WikiText test passages truncated to 128 tokens. Compare native assignment against each shuffle and trained static endpoints. Show every seed. Report both static endpoints and identify interpolated static comparisons. If the test operating point falls outside the calibrated interval, report the budget mismatch.
 - **Secondary endpoints.** Full zero-shot ARC-Challenge and HellaSwag normalized multiple-choice accuracy for dense, native, trained static and random policies. The shuffle intervention is evaluated on WikiText only. Likelihood evaluation uses batch one for downstream routing accounting. No decoding or deployed inference speed claim follows from these experiments.
-- **Uncertainty.** `paired.csv` uses 1,000 paired passage or item resamples within a seed. `seeds.csv` reports variation across the three training seeds. Shuffles and random masks reuse checkpoints. Treat them as repeated interventions, never as additional training seeds. WikiText passages can share an article, so passage intervals can understate uncertainty about new articles.
+- **Uncertainty.** `paired.csv` uses 1,000 paired resamples within a seed, by batch on WikiText and by item on the downstream tasks. `seeds.csv` reports variation across the three training seeds. Shuffles and random masks reuse checkpoints. WikiText passages can share an article across batches, so intervals can understate uncertainty about new articles. `static_budget_comparison.csv` reports a descriptive interval at the observed interpolation weight and flags intervals within ±ln(1.02) nats/token, a predeclared study margin corresponding to a 2% perplexity ratio.
 
 ## 5. Check the evidence before writing
 
 ```powershell
-$out = Resolve-Path .\new\artifacts\tmlr-2026-11-22 -ErrorAction Stop
+$out = Resolve-Path .\new\artifacts\tmlr-routing-controls -ErrorAction Stop
 $rows = @(Get-Content -LiteralPath (Join-Path $out 'SHA256SUMS') -ErrorAction Stop)
 if ($rows.Count -eq 0) { throw 'Empty checksum manifest' }
 foreach ($line in $rows) {

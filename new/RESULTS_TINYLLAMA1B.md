@@ -26,7 +26,8 @@ dlr30 26.1 / stoch50 250.2 / dlr50 37.1 — same ordering, lower absolute values
 
 ## Matched-compute audit (`new/artifacts/evals/tinyllama1b-002-matched/`)
 
-Same dense LoRA weights, only the gate differs — isolates routing from training:
+The random masks use the dense LoRA checkpoint. The learned router uses separately
+adapted LoRA weights, so this audit measures the combined effects of routing and adaptation.
 
 | variant | gate | skip (measured) | ppl | ARC-c | HellaSwag |
 |---|---|---|---|---|---|
@@ -35,7 +36,7 @@ Same dense LoRA weights, only the gate differs — isolates routing from trainin
 | random_25 | coin-flip mask, p=0.25 | 0.21 | 112.55 | 0.21 | 0.38 |
 | token_dlr_50 | learned router | 0.25 | 24.35 | 0.36 | 0.56 |
 
-Learned >> random at the same measured skip: 3.3x ppl at ~0.15, 4.6x at ~0.25,
+Learned >> random at nearby measured skip: 3.3x ppl at ~0.15, 4.6x at 0.21–0.25,
 +0.11/+0.15 ARC-c, +0.22/+0.18 HellaSwag. Winogrande is noise (~0.5 for all).
 
 ## Calibration (`new/experiments/calibrate_skip.py`, `new/artifacts/analysis/`)

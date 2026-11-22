@@ -421,7 +421,7 @@ def load_variant(manifest: Dict[str, Any], variant: Dict[str, Any]) -> LoadedVar
         peft_model.router = router
         return LoadedVariant(variant["name"], variant["type"], peft_model, tokenizer, router, always_keep)
 
-    model = peft_model.merge_and_unload()
+    model = peft_model.merge_and_unload() if manifest.get("merge_lora", True) else peft_model
     out = LoadedVariant(variant["name"], variant["type"], model, tokenizer)
     if variant["type"] == "stochastic":
         out.keep_mask = variant.get("keep_mask")
@@ -520,6 +520,25 @@ def routing_metrics_from_gates(gates_list: List[Any], always_keep: int) -> Dict[
     return canonical(gates, always_keep)
 
 
+def length_matched_batches(attention_masks, batch_size):
+    from collections import defaultdict
+
+    groups = defaultdict(list)
+    for index, mask in enumerate(attention_masks):
+        groups[tuple(mask)].append(index)
+
+    batches, singletons = [], []
+    for rows in groups.values():
+        for start in range(0, len(rows), batch_size):
+            chunk = rows[start:start + batch_size]
+            if len(chunk) > 1:
+                batches.append(chunk)
+            else:
+                singletons.extend(chunk)
+    batches.extend(singletons[i:i + batch_size] for i in range(0, len(singletons), batch_size))
+    return batches
+
+
 def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any], gate_transform=None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     torch, _, _, load_dataset, _, DataLoader, _, _ = import_torch_stack()
     ppl_cfg = manifest.get("perplexity", {})
@@ -535,7 +554,7 @@ def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any], gate_tr
     raw = load_dataset(dataset_name, dataset_config, split=split, revision=ppl_cfg.get("revision"))
     raw = raw.filter(lambda x: len(x["text"]) > 100)
     raw = raw.select(range(min(samples, len(raw))))
-    examples = []
+    examples, batch_ids = {}, {}
     if manifest.get("log_samples"):
         example_ids = [hashlib.sha256(t.encode()).hexdigest() for t in raw["text"]]
     ds = raw.map(
@@ -544,8 +563,12 @@ def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any], gate_tr
         batched=True,
         remove_columns=raw.column_names,
     )
+    if ppl_cfg.get("length_matched_batches"):
+        batches = length_matched_batches(ds["attention_mask"], batch_size)
+    else:
+        batches = [list(range(i, min(i + batch_size, len(ds)))) for i in range(0, len(ds), batch_size)]
     ds.set_format("torch")
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
+    loader = DataLoader(ds, batch_sampler=batches)
 
     loaded.model.eval()
     total_nll = 0.0
@@ -573,7 +596,7 @@ def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any], gate_tr
         ctx = mask_ctx if mask_ctx is not None else _nullcontext()
         with ctx as maybe_mask:
             stochastic_mask = maybe_mask
-            for batch in loader:
+            for batch_id, (indices, batch) in enumerate(zip(batches, loader, strict=True)):
                 batch = {k: v.to(device) for k, v in batch.items() if hasattr(v, "to")}
                 scored = int((batch["labels"][:, 1:] != -100).sum().item())
                 token_count += scored
@@ -607,8 +630,9 @@ def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any], gate_tr
                     nll = torch.nn.functional.cross_entropy(outputs.logits[:, :-1].float().transpose(1, 2),
                                                             targets, reduction="none")
                     counts = (targets != -100).sum(dim=1).tolist()
-                    for value, count in zip(nll.sum(dim=1).tolist(), counts):
-                        examples.append([example_ids[len(examples)], count, value])
+                    for index, value, count in zip(indices, nll.sum(dim=1).tolist(), counts, strict=True):
+                        examples[index] = [example_ids[index], count, value]
+                        batch_ids[index] = batch_id
                     total_nll += float(nll.sum().item())
                 else:
                     total_nll += float(outputs.loss.item()) * scored
@@ -635,7 +659,9 @@ def evaluate_perplexity(loaded: LoadedVariant, manifest: Dict[str, Any], gate_tr
         "tokens_per_sec": token_count / elapsed,
     }
     if examples:
-        ppl_result["examples"] = examples
+        ppl_result["examples"] = [examples[i] for i in range(len(raw))]
+        if ppl_cfg.get("length_matched_batches"):
+            ppl_result["batch_ids"] = [batch_ids[i] for i in range(len(raw))]
     return ppl_result, routing
 
 

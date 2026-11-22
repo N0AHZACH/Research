@@ -20,7 +20,12 @@ from transformers import (
 
 from new.experiments import evaluate as ev
 from new.experiments.tmlr_pilot import check_forward, shuffled_routes
-from new.experiments.tmlr_study import verify_shuffle
+from new.experiments.tmlr_study import (
+    fixed_candidates,
+    paired_interval,
+    paired_nll_inputs,
+    verify_shuffle,
+)
 
 
 def exercise(folder, config, cls):
@@ -83,14 +88,20 @@ def exercise(folder, config, cls):
     model.save_pretrained(folder / "adapter")
     tok.save_pretrained(folder / "adapter")
     torch.save(router.state_dict(), folder / "router.pt")
-    raw = Dataset.from_dict({"text": ["one two " * 16, "three " * 18, "one " * 28]})
+    texts = ["one two " * 16, "three " * 18, "two one " * 16, "one " * 28]
+    raw = Dataset.from_dict({"text": texts})
     cfg = {
         "model_id": str(folder / "base"),
         "device": "cpu",
         "dtype": "float32",
+        "merge_lora": False,
         "batch_size": 2,
         "log_samples": True,
-        "perplexity": {"samples": 3, "max_length": 32},
+        "perplexity": {
+            "samples": len(texts),
+            "max_length": 32,
+            "length_matched_batches": True,
+        },
     }
     spec = {
         "name": "dlr",
@@ -103,9 +114,25 @@ def exercise(folder, config, cls):
     check_forward(torch, loaded)
     with patch("datasets.load_dataset", return_value=raw):
         p, r = ev.evaluate_perplexity(loaded, cfg)
-        q, s = ev.evaluate_perplexity(loaded, cfg, shuffled_routes(torch, 11))
-        verify_shuffle({"routing": r}, {"routing": s})
-        assert len(p["examples"]) == len(q["examples"]) == 3
+        assert [example[1] for example in p["examples"]] == [31, 17, 31, 27]
+        assert p["batch_ids"] == [0, 1, 0, 1]
+        for whole_sequences in (False, True):
+            transform = shuffled_routes(torch, 11, whole_sequences=whole_sequences)
+            q, s = ev.evaluate_perplexity(loaded, cfg, transform)
+            verify_shuffle({"routing": r}, {"routing": s})
+            assert len(p["examples"]) == len(q["examples"]) == len(texts)
+            delta, weights = paired_nll_inputs(p, q)
+            effect, low, high = paired_interval(delta, weights)
+            assert (
+                abs(
+                    effect
+                    - (p["negative_log_likelihood"] - q["negative_log_likelihood"])
+                )
+                < 1e-5
+            )
+            assert low <= high
+            if whole_sequences:
+                assert (transform.eligible, transform.total) == (64, 110)
         assert (
             abs(
                 sum(x[2] for x in p["examples"]) / p["num_tokens"]
@@ -161,6 +188,20 @@ if __name__ == "__main__":
     assert torch.equal(moved[:, 0], gates[:, 0].flip(0))
     assert torch.equal(moved[:, 1], gates[:, 1])
     assert (transform.changed, transform.total) == (2, 3)
+    gates = torch.arange(12).reshape(3, 2, 2)
+    mask = torch.tensor([[1, 1], [1, 0], [1, 1]])
+    transform = shuffled_routes(torch, 7, whole_sequences=True)
+    moved = transform(gates, mask)
+    torch.testing.assert_close(moved, gates[[2, 1, 0]])
+    torch.testing.assert_close(moved[mask.bool()].sum(0), gates[mask.bool()].sum(0))
+    assert (transform.changed, transform.eligible, transform.total) == (4, 4, 5)
+    assert list(fixed_candidates([2, 0, 3, 1], 2)) == [
+        [0, 2],
+        [0, 3],
+        [0, 1],
+        [2, 3],
+        [1, 2],
+    ]
     for config, cls in [
         (LlamaConfig, LlamaForCausalLM),
         (Qwen2Config, Qwen2ForCausalLM),

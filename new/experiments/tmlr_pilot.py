@@ -9,22 +9,40 @@ else:
     import evaluate as ev
 
 
-def shuffled_routes(torch, seed):
+def shuffled_routes(torch, seed, *, whole_sequences=False):
     generator = torch.Generator().manual_seed(seed)
 
+    def permute(rows, device):
+        order = rows[torch.randperm(len(rows), generator=generator)].to(device)
+        return order, order.roll(1)
+
     def shuffle(gates, mask):
-        # Move entire route vectors between examples at the same valid position.
+        valid = mask.bool()
+        cpu_mask = valid.cpu()
         result = gates.clone()
-        for pos, column in enumerate(mask.bool().cpu().T):
-            rows = column.nonzero().flatten()
-            if len(rows) > 1:
-                order = rows[torch.randperm(len(rows), generator=generator)].to(gates.device)
-                result[order, pos] = gates[order.roll(1), pos]
-        shuffle.changed += int(((result != gates).any(dim=-1) & mask.bool()).sum().item())
-        shuffle.total += int(mask.sum().item())
+        eligible = 0
+        if whole_sequences:
+            # Swap trajectories only between passages with identical valid positions.
+            _, groups = torch.unique(cpu_mask, dim=0, return_inverse=True)
+            for group in groups.unique():
+                rows = (groups == group).nonzero().flatten()
+                if len(rows) > 1:
+                    order, donors = permute(rows, gates.device)
+                    result[order] = torch.where(valid[order, :, None], gates[donors], gates[order])
+                    eligible += int(cpu_mask[rows].sum())
+        else:
+            for pos, column in enumerate(cpu_mask.T):
+                rows = column.nonzero().flatten()
+                if len(rows) > 1:
+                    order, donors = permute(rows, gates.device)
+                    result[order, pos] = gates[donors, pos]
+                    eligible += len(rows)
+        shuffle.changed += int(((result != gates).any(dim=-1) & valid).sum().item())
+        shuffle.eligible += eligible
+        shuffle.total += int(cpu_mask.sum())
         return result
 
-    shuffle.changed = shuffle.total = 0
+    shuffle.changed = shuffle.eligible = shuffle.total = 0
     return shuffle
 
 
