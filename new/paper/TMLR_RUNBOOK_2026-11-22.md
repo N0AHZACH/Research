@@ -4,7 +4,7 @@ This runbook covers the validation pilot and the complete study. The runner trai
 
 ## 1. Install once
 
-Open **PowerShell on native Windows**. Install Git for Windows, 64-bit Python 3.12 with the Windows Python launcher (`py`), and a compatible NVIDIA driver for a bfloat16-capable CUDA GPU. Allow persistent storage for checkpoints and the Hugging Face cache. A 24 GB GPU is a reasonable starting choice. Total VRAM, elapsed time and disk usage for the full campaign have not been measured. Check free space and measure the first run before booking a long rental. Downloads require access to Hugging Face and the package indexes.
+Open **PowerShell on native Windows**. Install Git for Windows, 64-bit Python 3.12 with the Windows Python launcher (`py`), and an NVIDIA driver compatible with CUDA 12.4. Allow persistent storage for checkpoints and the Hugging Face cache. The project previously recorded TinyLlama bf16 runs on an **RTX 4060 Laptop GPU with 8 GB VRAM**, including a 500-step run. Use the preflight below to measure the revised protocol on your laptop. Downloads require access to Hugging Face and the package indexes.
 
 In an existing repository clone:
 
@@ -38,7 +38,16 @@ The CPU smoke also checks that whole-sequence swaps preserve per-layer usage, th
 Open PowerShell in the repository root for each session. Every command below selects the project’s Windows Python explicitly.
 
 ```powershell
+nvidia-smi
 .\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study freeze
+.\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study preflight --family tiny
+```
+
+The preflight runs two optimizer steps each for dense LoRA and the learned router at the study's bf16 precision, batch size and context length. It then runs WikiText validation. It saves training and validation peak PyTorch GPU memory in `new/artifacts/tmlr-routing-controls/preflight-tiny/resources.json`. These are allocator peaks. Use `nvidia-smi` to see GPU memory already in use by Windows or other applications. Run one GPU job at a time, with the laptop plugged in. The preflight checkpoints stay in their own directory.
+
+When TinyLlama passes on your laptop, run:
+
+```powershell
 .\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study pilot
 ```
 
@@ -50,15 +59,15 @@ Get-Content .\new\artifacts\tmlr-routing-controls\tiny-42\pilot_summary.json
 
 Each shuffle must preserve native per-layer activity. `eligible_fraction` is the fraction of valid tokens that have a donor under that shuffle. `changed_fraction` is the fraction of valid tokens that actually received a different route. Low coverage or little route variation limits what a weak effect can establish. Negative `native_minus_nll` favors native routing. Use the pilot to check the controls, the fixed-policy depths and actual resource use before starting the full sweep. Keep the output whatever the result.
 
-## 3. Finish at your pace
+## 3. Finish one seed at a time
 
-**One command** runs or resumes the entire sequence, including the pilot, all six family/seed jobs, checkpoint replay and analysis:
+Before the first Qwen run, check its bf16 training and WikiText validation footprint separately. Qwen has a larger vocabulary and model, so TinyLlama's peak does not establish that Qwen fits. If Qwen runs out of memory, keep the error and TinyLlama outputs. Run Qwen on a GPU with more available VRAM to use the same protocol. A batch-size change needs a revised protocol and fresh output directory.
 
 ```powershell
-.\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study all
+.\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study preflight --family qwen
 ```
 
-**For separate sessions**, run these commands individually after the pilot:
+Run these commands individually after the TinyLlama pilot and the respective preflight:
 
 ```powershell
 .\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study run --family tiny --seed 42

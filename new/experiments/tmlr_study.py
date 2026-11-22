@@ -84,7 +84,7 @@ def mask_for(order, k):
     return [int(i not in dropped) for i in range(len(order))]
 
 
-def fit(folder, name, model, frozen, seed, variant, extra=()):
+def fit(folder, name, model, frozen, seed, variant, extra=(), *, steps=500):
     path = folder / name
     if not path.exists():
         with tempfile.TemporaryDirectory(dir=folder) as tmp:
@@ -103,7 +103,7 @@ def fit(folder, name, model, frozen, seed, variant, extra=()):
                     "--seed",
                     str(seed),
                     "--max-steps",
-                    "500",
+                    str(steps),
                     "--batch-size",
                     "4",
                     "--skip-weight",
@@ -120,6 +120,7 @@ def fit(folder, name, model, frozen, seed, variant, extra=()):
                 "adapter_model.safetensors",
                 "adapter_config.json",
                 "manifest.json",
+                "summary.json",
             ]
             if variant.startswith("token_dlr"):
                 files.append("router_weights.pt")
@@ -171,6 +172,7 @@ def measure(spec, model, frozen, split, shuffle=None, tasks=False, check=False):
             "length_matched_batches": True,
         },
     }
+    torch.cuda.reset_peak_memory_stats()
     loaded = ev.load_variant(cfg, spec)
     try:
         if check:
@@ -202,6 +204,10 @@ def measure(spec, model, frozen, split, shuffle=None, tasks=False, check=False):
                 ]
                 if len(samples) != {"arc_challenge": 1172, "hellaswag": 10042}[task]:
                     raise ValueError(f"Incomplete {task} evaluation")
+        result["cuda_memory"] = {
+            "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+            "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
+        }
         return result
     finally:
         ev.cleanup_loaded(loaded)
@@ -217,18 +223,46 @@ def fixed_candidates(ranking, dropped):
                 yield sorted([*selected[:i], *selected[i + 1 :], replacement])
 
 
-def job(root, family, seed, pilot=False, replay=False):
+def load_study_model(frozen, family):
     import torch
     from huggingface_hub import snapshot_download
 
     if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
         raise RuntimeError("CUDA with bfloat16 support required")
-    frozen = read(root / "protocol.json")
-    model = snapshot_download(
+    return snapshot_download(
         MODELS[family],
         revision=frozen["models"][family],
         allow_patterns=["*.safetensors", "*.json", "*.model", "*.txt", "*.jinja"],
     )
+
+
+def preflight(root, family):
+    frozen = read(root / "protocol.json")
+    model = load_study_model(frozen, family)
+    folder = root / f"preflight-{family}"
+    folder.mkdir(exist_ok=True)
+    summary = {}
+    for name, variant in [("dense", "dense"), ("dlr50", "token_dlr_50")]:
+        path = fit(folder, name, model, frozen, SEEDS[0], variant, steps=2)
+        training = read(path / "summary.json")
+        evaluation = cache(
+            folder / f"{name}_validation.json",
+            lambda path=path, check=name == "dlr50": measure(
+                arm(path), model, frozen, "validation", check=check
+            ),
+        )
+        summary[name] = {
+            "training_seconds": training["wall_clock_s"],
+            "training_cuda_memory": training["cuda_memory"],
+            "validation_cuda_memory": evaluation["cuda_memory"],
+        }
+    save(folder / "resources.json", summary)
+    print(json.dumps(summary, indent=2))
+
+
+def job(root, family, seed, pilot=False, replay=False):
+    frozen = read(root / "protocol.json")
+    model = load_study_model(frozen, family)
     folder = root / f"{family}-{seed}"
     folder.mkdir(exist_ok=True)
 
@@ -578,7 +612,8 @@ def report(root):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "stage", choices=["freeze", "pilot", "run", "report", "replay", "all"]
+        "stage",
+        choices=["freeze", "preflight", "pilot", "run", "report", "replay", "all"],
     )
     p.add_argument(
         "--out", type=Path, default=Path("new/artifacts/tmlr-routing-controls")
@@ -586,8 +621,10 @@ def main():
     p.add_argument("--family", choices=MODELS)
     p.add_argument("--seed", type=int, choices=SEEDS)
     args = p.parse_args()
-    if (args.family or args.seed) and args.stage != "run":
-        p.error("--family and --seed apply only to the run stage")
+    if args.seed and args.stage != "run":
+        p.error("--seed applies only to the run stage")
+    if args.family and args.stage not in ("preflight", "run"):
+        p.error("--family applies only to the preflight and run stages")
     root = args.out.resolve()
     root.mkdir(parents=True, exist_ok=True)
     from filelock import FileLock
@@ -604,6 +641,8 @@ def main():
             raise RuntimeError(
                 "Use the frozen commit or start a separate output directory"
             )
+        if args.stage == "preflight":
+            preflight(root, args.family or "tiny")
         if args.stage in ("all", "pilot"):
             job(root, "tiny", 42, pilot=True)
         if args.stage in ("all", "run"):

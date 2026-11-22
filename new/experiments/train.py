@@ -75,6 +75,8 @@ def main():
         print("WARNING: CUDA not available — running on CPU.")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
 
     set_seed(args.seed)
     tok = load_tokenizer(args.model_id)
@@ -122,6 +124,14 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     result = train(model, router, train_ds, eval_ds, cfg, collate)
+    cuda_memory = {}
+    if device == "cuda":
+        cuda_memory = {
+            "gpu": torch.cuda.get_device_name(),
+            "total_bytes": torch.cuda.get_device_properties(0).total_memory,
+            "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+            "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
+        }
 
     trainable, total = count_params(model)
     model.save_pretrained(out_dir)
@@ -148,6 +158,8 @@ def main():
     summary = {"variant": variant, "eval_ppl": result["eval_ppl"],
                "wall_clock_s": result["wall_clock_s"], "final_metrics": fm,
                "structural_flop_red_pct": flop_red, "out_dir": out_dir}
+    if cuda_memory:
+        summary["cuda_memory"] = cuda_memory
     with open(os.path.join(out_dir, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
     print(json.dumps(summary, indent=2))
