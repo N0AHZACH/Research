@@ -1,14 +1,14 @@
-# Run the TMLR routing study · 22 November 2026
+# Run the TMLR routing study on Windows · 22 November 2026
 
 **Use this file for the complete study.** The older undated runbook describes the exploratory pilot. This version trains fresh checkpoints, evaluates the learned, shuffled, dense, fixed and stochastic policies, and generates the analysis files. An old checkpoint is optional for the older pilot and unnecessary here.
 
 ## 1. Install once
 
-Use Linux or WSL2 with a compatible NVIDIA driver, a bfloat16-capable GPU, Python 3.12, and persistent storage for checkpoints and the Hugging Face cache. A 24 GB GPU is a reasonable starting choice. Total VRAM, elapsed time and disk usage for the full campaign have not been measured. Check free space and measure the first run before booking a long rental. Downloads require access to Hugging Face and the package indexes.
+Open **PowerShell on native Windows**. Install Git for Windows, 64-bit Python 3.12 with the Windows Python launcher (`py`), and a compatible NVIDIA driver for a bfloat16-capable CUDA GPU. Allow persistent storage for checkpoints and the Hugging Face cache. A 24 GB GPU is a reasonable starting choice. Total VRAM, elapsed time and disk usage for the full campaign have not been measured. Check free space and measure the first run before booking a long rental. Downloads require access to Hugging Face and the package indexes.
 
 In an existing repository clone:
 
-```bash
+```powershell
 git fetch origin
 git switch tmlr-routing-pilot
 git pull --ff-only origin tmlr-routing-pilot
@@ -16,49 +16,39 @@ git pull --ff-only origin tmlr-routing-pilot
 
 For a fresh clone use:
 
-```bash
+```powershell
 git clone --branch tmlr-routing-pilot https://github.com/N0AHZACH/Research.git
 cd Research
 ```
 
 From the repository root:
 
-```bash
-python3.12 -m venv .venv-gpu
-source .venv-gpu/bin/activate
-python -m pip install --upgrade pip
-python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-python -m pip install -r new/scripts/gpu/requirements-gpu.txt matplotlib
-python -m pip check
-python -c 'import torch; assert torch.cuda.is_available() and torch.cuda.is_bf16_supported(); print(torch.cuda.get_device_name(), torch.ones(4, device="cuda").sum().item())'
-python -m new.tests.tmlr_smoke
+```powershell
+.\new\scripts\gpu\setup_tmlr_windows.cmd
 ```
+
+Continue after the setup prints **Windows setup and smoke test passed**. It uses the virtual environment’s Python directly, so you can run every command in ordinary PowerShell.
 
 The offline smoke test exercises tiny randomly initialized Llama and Qwen2 models. It checks one training step each for a static and learned policy, checkpoint reload, padding, gates, next-token loss and the likelihood-task forward path. Passing it means the small numerical paths work in your environment. The real-model pilot is the next check.
 
-**Verification at handoff.** The CPU smoke passed using torch 2.6.0 and the pinned Transformers, PEFT, datasets and lm-eval versions. A synthetic six-job result set generated all four CSVs and the PDF. The real pretrained checkpoints, full benchmarks, CUDA performance and scientific conclusions need the runs below.
+**Verification at handoff (Linux host).** The CPU smoke passed using torch 2.6.0 and the pinned Transformers, PEFT, datasets and lm-eval versions. A synthetic six-job result set generated all four CSVs and the PDF. All eight PowerShell command blocks passed a parser check. The pilot-display and checksum blocks ran against sample artifacts. Native Windows setup, CUDA performance and the real-model results still require the runs below.
 
 ## 2. Start small
 
-Activate the environment again in each new shell. Use the repository root for all commands.
+Open PowerShell in the repository root for each session. Every command below selects the project’s Windows Python explicitly.
 
-```bash
-source .venv-gpu/bin/activate
-python -m new.experiments.tmlr_study freeze
-python -m new.experiments.tmlr_study pilot
+```powershell
+.\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study freeze
+.\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study pilot
 ```
 
 The output directory is `new/artifacts/tmlr-2026-11-22/`. Back it up together with your model cache. `protocol.json` records the source commit, package versions, model and WikiText revisions, split row indices and text hashes. Freeze uses the revisions available at first execution. Share this exact file for replication. Inspect the pilot:
 
-```bash
-python - <<'PY'
-import json, pathlib
-folder = pathlib.Path("new/artifacts/tmlr-2026-11-22/tiny-42")
-for path in sorted(folder.glob("pilot_*.json")):
-    row = json.loads(path.read_text())
-    print(path.stem, "PPL", row["ppl"]["perplexity"], "skip", row["routing"]["achieved_skip"],
-          "routes changed", row.get("changed_fraction", 0))
-PY
+```powershell
+Get-ChildItem .\new\artifacts\tmlr-2026-11-22\tiny-42\pilot_*.json | ForEach-Object {
+    $row = Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json
+    [pscustomobject]@{ Arm = $_.BaseName; PPL = $row.ppl.perplexity; Skip = $row.routing.achieved_skip; ChangedFraction = $row.changed_fraction }
+}
 ```
 
 Each shuffle preserves native per-layer activity. If few routes change, the intervention has little power to detect an assignment effect. Inspect this before using paid compute. A weak or reversed effect is a valid result. Keep the output.
@@ -67,21 +57,21 @@ Each shuffle preserves native per-layer activity. If few routes change, the inte
 
 **One command** runs or resumes the entire sequence, including the pilot, all six family/seed jobs, checkpoint replay and analysis:
 
-```bash
-python -m new.experiments.tmlr_study all
+```powershell
+.\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study all
 ```
 
 **For separate sessions**, run these commands individually after the pilot:
 
-```bash
-python -m new.experiments.tmlr_study run --family tiny --seed 42
-python -m new.experiments.tmlr_study run --family tiny --seed 43
-python -m new.experiments.tmlr_study run --family tiny --seed 44
-python -m new.experiments.tmlr_study run --family qwen --seed 42
-python -m new.experiments.tmlr_study run --family qwen --seed 43
-python -m new.experiments.tmlr_study run --family qwen --seed 44
-python -m new.experiments.tmlr_study replay
-python -m new.experiments.tmlr_study report
+```powershell
+.\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study run --family tiny --seed 42
+.\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study run --family tiny --seed 43
+.\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study run --family tiny --seed 44
+.\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study run --family qwen --seed 42
+.\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study run --family qwen --seed 43
+.\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study run --family qwen --seed 44
+.\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study replay
+.\.venv-gpu\Scripts\python.exe -m new.experiments.tmlr_study report
 ```
 
 Run one process per output directory. Each completed training job or evaluation arm is saved separately. On interruption rerun the same command. The current unfinished checkpoint or evaluation arm restarts. A complete family/seed job includes many full benchmark passes. For an OOM or a failed invariant, keep the traceback and diagnose the failing stage. Altering batch size changes the shuffle intervention. A modified protocol needs a new commit and output directory (`--out PATH` on each command).
@@ -97,8 +87,17 @@ Run one process per output directory. Each completed training job or evaluation 
 
 ## 5. Check the evidence before writing
 
-```bash
-(cd new/artifacts/tmlr-2026-11-22 && sha256sum --check --quiet SHA256SUMS)
+```powershell
+$out = Resolve-Path .\new\artifacts\tmlr-2026-11-22 -ErrorAction Stop
+$rows = @(Get-Content -LiteralPath (Join-Path $out 'SHA256SUMS') -ErrorAction Stop)
+if ($rows.Count -eq 0) { throw 'Empty checksum manifest' }
+foreach ($line in $rows) {
+    if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw "Invalid checksum row: $line" }
+    $expected = $Matches[1]
+    $file = Join-Path $out $Matches[2]
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file -ErrorAction Stop).Hash -ne $expected) { throw "Checksum mismatch: $file" }
+}
+"Verified $($rows.Count) artifact files."
 ```
 
 | Output | Use |

@@ -2,7 +2,6 @@
 
 import argparse
 import csv
-import fcntl
 import hashlib
 import json
 import math
@@ -484,8 +483,9 @@ def main():
         p.error("--family and --seed apply only to the run stage")
     root = args.out.resolve()
     root.mkdir(parents=True, exist_ok=True)
-    with (root / ".lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    from filelock import FileLock
+
+    with FileLock(root / ".lock", timeout=0):
         if git("status", "--porcelain", "--untracked-files=no"):
             raise RuntimeError(
                 "Commit tracked edits before freezing or continuing the study"
@@ -516,7 +516,7 @@ def main():
             )
             with (root / "SHA256SUMS").open("w") as f:
                 for path in artifacts:
-                    f.write(f"{ev.file_sha256(path)}  {path.relative_to(root)}\n")
+                    f.write(f"{ev.file_sha256(path)}  {path.relative_to(root).as_posix()}\n")
             print("Tables written to", root)
 
 
